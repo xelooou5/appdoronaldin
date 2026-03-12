@@ -1,14 +1,10 @@
-google-genai
+google-generativeai
 groq
 deepseek
 codegeex
 python-telegram-bot
-google-generativeai
 python-dotenv
 Pillow
 openai
-groq
 requests
-deepseek
-codegeex
 

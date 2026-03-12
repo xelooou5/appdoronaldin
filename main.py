@@ -6,7 +6,7 @@ import io
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
-import google_genai as genai
+import google.generativeai as genai
 from PIL import Image
 import openai
 
@@ -136,13 +136,16 @@ async def send_warning_5min(context: ContextTypes.DEFAULT_TYPE):
 
 # Multi-AI image analysis abstraction
 async def multi_ai_analyze_image(image_bytes, prompt):
+    logger.info("[AI] Starting multi-AI image analysis...")
     # Try Gemini first
     if gemini_model:
         try:
+            logger.info("[AI] Trying Gemini...")
             loop = asyncio.get_running_loop()
             image = Image.open(io.BytesIO(image_bytes))
             response = await loop.run_in_executor(None, lambda: gemini_model.generate_content([prompt, image]))
             if response and response.text:
+                logger.info("[AI] Gemini succeeded.")
                 return response.text
         except Exception as e:
             logger.error(f"Gemini failed: {e}")
@@ -150,6 +153,7 @@ async def multi_ai_analyze_image(image_bytes, prompt):
     # Try OpenAI
     if openai_client:
         try:
+            logger.info("[AI] Trying OpenAI...")
             import base64
             base64_image = base64.b64encode(image_bytes).decode('utf-8')
             response = await openai_client.chat.completions.create(
@@ -168,12 +172,14 @@ async def multi_ai_analyze_image(image_bytes, prompt):
                 ],
                 max_tokens=300,
             )
+            logger.info("[AI] OpenAI succeeded.")
             return response.choices[0].message.content
         except Exception as e:
             logger.error(f"OpenAI failed: {e}")
     # Try Groq (if API key provided)
     if GROQ_API_KEY:
         try:
+            logger.info("[AI] Trying Groq...")
             # Placeholder for Groq image analysis
             pass
         except Exception as e:
@@ -181,6 +187,7 @@ async def multi_ai_analyze_image(image_bytes, prompt):
     # Try DeepSeek (if API key provided)
     if DEEPSEEK_API_KEY:
         try:
+            logger.info("[AI] Trying DeepSeek...")
             # Placeholder for DeepSeek image analysis
             pass
         except Exception as e:
@@ -188,11 +195,27 @@ async def multi_ai_analyze_image(image_bytes, prompt):
     # Try CodeGeeX (if API key provided)
     if CODEGEEX_API_KEY:
         try:
+            logger.info("[AI] Trying CodeGeeX...")
             # Placeholder for CodeGeeX image analysis
             pass
         except Exception as e:
             logger.error(f"CodeGeeX failed: {e}")
+    logger.warning("[AI] All AI fallbacks failed.")
     return None
+# Admin/manual override command
+async def admin_override(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if str(chat_id) in os.getenv("ADMIN_IDS", "").split(","):
+        await update.message.reply_text("Override: acesso liberado manualmente pelo admin.")
+        await update.message.reply_text(
+            f"📲 Link de acesso ao app: {LINK_APP}\n"
+            f"💬 Link do grupo do Telegram (lives): {LINK_GRUPO}\n\n"
+            "Boas apostas!"
+        )
+        return ConversationHandler.END
+    else:
+        await update.message.reply_text("Você não tem permissão para usar este comando.")
+        return ConversationHandler.END
 
 async def handle_registration_print(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -305,15 +328,15 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 def main():
-            # Heartbeat function to keep Railway build alive
-            def heartbeat():
-                import time
-                while True:
-                    print("[Heartbeat] Bot alive")
-                    time.sleep(30)
+    # Heartbeat function to keep Railway build alive
+    def heartbeat():
+        import time
+        while True:
+            print("[Heartbeat] Bot alive")
+            time.sleep(30)
 
-            # Start heartbeat in a background thread
-            threading.Thread(target=heartbeat, daemon=True).start()
+    # Start heartbeat in a background thread
+    threading.Thread(target=heartbeat, daemon=True).start()
     print("[Startup] Checking environment variables...")
     print(f"TELEGRAM_TOKEN: {'set' if TELEGRAM_TOKEN else 'missing'}")
     print(f"GEMINI_API_KEY: {'set' if GEMINI_API_KEY else 'missing'}")
@@ -336,7 +359,7 @@ def main():
                 WAITING_FOR_REGISTRATION_PRINT: [MessageHandler(filters.PHOTO, handle_registration_print)],
                 WAITING_FOR_DEPOSIT_PRINT: [MessageHandler(filters.PHOTO, handle_deposit_print)],
             },
-            fallbacks=[CommandHandler("cancel", cancel)],
+            fallbacks=[CommandHandler("cancel", cancel), CommandHandler("override", admin_override)],
         )
 
         application.add_handler(conv_handler)
