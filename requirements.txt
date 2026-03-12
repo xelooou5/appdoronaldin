@@ -1,0 +1,10 @@
+python-telegram-bot
+google-generativeai
+python-dotenv
+Pillow
+openai
+groq
+requests
+deepseek
+codegeex
+
