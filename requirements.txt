@@ -1,3 +1,7 @@
+google-genai
+groq
+deepseek
+codegeex
 python-telegram-bot
 google-generativeai
 python-dotenv

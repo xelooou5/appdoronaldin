@@ -2,14 +2,12 @@ import os
 import asyncio
 import logging
 import io
-import time
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
-import google.generativeai as genai
+import google.genai as genai
 from PIL import Image
 import openai
-import requests
 
 # Load environment variables
 load_dotenv()
@@ -22,7 +20,7 @@ DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 CODEGEEX_API_KEY = os.getenv("CODEGEEX_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# Setup AI Clients
+ # Setup AI Clients
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
     gemini_model = genai.GenerativeModel('gemini-1.5-flash')
