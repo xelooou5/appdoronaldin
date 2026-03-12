@@ -1,3 +1,4 @@
+import threading
 import os
 import asyncio
 import logging
@@ -304,6 +305,15 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 def main():
+            # Heartbeat function to keep Railway build alive
+            def heartbeat():
+                import time
+                while True:
+                    print("[Heartbeat] Bot alive")
+                    time.sleep(30)
+
+            # Start heartbeat in a background thread
+            threading.Thread(target=heartbeat, daemon=True).start()
     print("[Startup] Checking environment variables...")
     print(f"TELEGRAM_TOKEN: {'set' if TELEGRAM_TOKEN else 'missing'}")
     print(f"GEMINI_API_KEY: {'set' if GEMINI_API_KEY else 'missing'}")
