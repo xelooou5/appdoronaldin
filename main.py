@@ -5,7 +5,7 @@ import io
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
-import google.genai as genai
+import google_genai as genai
 from PIL import Image
 import openai
 
@@ -304,26 +304,38 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 def main():
+    print("[Startup] Checking environment variables...")
+    print(f"TELEGRAM_TOKEN: {'set' if TELEGRAM_TOKEN else 'missing'}")
+    print(f"GEMINI_API_KEY: {'set' if GEMINI_API_KEY else 'missing'}")
+    print(f"GROQ_API_KEY: {'set' if GROQ_API_KEY else 'missing'}")
+    print(f"DEEPSEEK_API_KEY: {'set' if DEEPSEEK_API_KEY else 'missing'}")
+    print(f"CODEGEEX_API_KEY: {'set' if CODEGEEX_API_KEY else 'missing'}")
+    print(f"OPENAI_API_KEY: {'set' if OPENAI_API_KEY else 'missing'}")
+
     if not TELEGRAM_TOKEN:
-        print("Error: TELEGRAM_TOKEN not found in .env file.")
-        return
+        print("[ERROR] TELEGRAM_TOKEN not found in .env file. Exiting.")
+        exit(1)
 
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    try:
+        application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        states={
-            WAITING_FOR_YES: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_yes)],
-            WAITING_FOR_REGISTRATION_PRINT: [MessageHandler(filters.PHOTO, handle_registration_print)],
-            WAITING_FOR_DEPOSIT_PRINT: [MessageHandler(filters.PHOTO, handle_deposit_print)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    )
+        conv_handler = ConversationHandler(
+            entry_points=[CommandHandler("start", start)],
+            states={
+                WAITING_FOR_YES: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_yes)],
+                WAITING_FOR_REGISTRATION_PRINT: [MessageHandler(filters.PHOTO, handle_registration_print)],
+                WAITING_FOR_DEPOSIT_PRINT: [MessageHandler(filters.PHOTO, handle_deposit_print)],
+            },
+            fallbacks=[CommandHandler("cancel", cancel)],
+        )
 
-    application.add_handler(conv_handler)
+        application.add_handler(conv_handler)
 
-    print("Bot is running...")
-    application.run_polling()
+        print("[Startup] Bot is running and polling...")
+        application.run_polling()
+    except Exception as e:
+        print(f"[ERROR] Bot failed to start: {e}")
+        exit(1)
 
 if __name__ == "__main__":
     main()
