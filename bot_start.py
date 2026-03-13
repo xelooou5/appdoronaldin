@@ -15,6 +15,16 @@ from database import Database
 
 # --- PYTHON VERSION CHECK ---
 import sys
+import atexit
+import tempfile
+LOCKFILE_PATH = os.path.join(tempfile.gettempdir(), 'appronaldin_bot.lock')
+
+def remove_lockfile():
+    try:
+        if os.path.exists(LOCKFILE_PATH):
+            os.remove(LOCKFILE_PATH)
+    except Exception as e:
+        print(f"[ERROR] Could not remove lock file: {e}")
 if sys.version_info < (3, 8):
     print("[ERROR] Python 3.8+ is required. Current version:", sys.version)
     exit(1)
@@ -406,8 +416,8 @@ def main():
     print("[Startup] Checking environment variables...")
     print(f"TELEGRAM_TOKEN: {'set' if TELEGRAM_TOKEN else 'missing'}")
     print(f"GEMINI_API_KEY: {'set' if GEMINI_API_KEY else 'missing'}")
-    print(f"GROQ_API_KEY: {'set' if GEMINI_API_KEY else 'missing'}")
-    print(f"DEEPSEEK_API_KEY: {'set' if GEMINI_API_KEY else 'missing'}")
+    print(f"GROQ_API_KEY: {'set' if GROQ_API_KEY else 'missing'}")
+    print(f"DEEPSEEK_API_KEY: {'set' if DEEPSEEK_API_KEY else 'missing'}")
     print(f"CODEGEEX_API_KEY: {'set' if CODEGEEX_API_KEY else 'missing'}")
     print(f"OPENAI_API_KEY: {'set' if OPENAI_API_KEY else 'missing'}")
 
@@ -415,7 +425,21 @@ def main():
         print("[ERROR] TELEGRAM_TOKEN not found in .env file. Exiting.")
         exit(1)
 
+    WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+    WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "8443"))
+    WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", f"/webhook/{TELEGRAM_TOKEN}")
 
+    # --- LOCK FILE CHECK ---
+    try:
+        if os.path.exists(LOCKFILE_PATH):
+            print(f"[ERROR] Lock file found at {LOCKFILE_PATH}. Another instance may be running.\nIf you are sure no other instance is running, run: python bot_start.py --remove-lockfile\nThen try again.")
+            exit(1)
+        with open(LOCKFILE_PATH, 'w') as lockfile:
+            lockfile.write(str(os.getpid()))
+        atexit.register(remove_lockfile)
+    except Exception as e:
+        print(f"[ERROR] Could not create lock file: {e}")
+        exit(1)
 
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
@@ -441,18 +465,38 @@ def main():
     application.add_handler(CommandHandler("ping", ping))
     # Add catch-all handler for diagnostics
     application.add_handler(MessageHandler(filters.ALL, catch_all))
-    print("[Startup] Bot is running and polling...")
-    logger.info("[Startup] Bot is running and polling...")
-    try:
-        application.run_polling()
-    except Exception as e:
-        if 'Conflict: terminated by other getUpdates request' in str(e):
-            print("[ERROR] Telegram polling conflict: Another bot instance is running. Please ensure only one instance is active.\nIf you see this, check for other running bot processes locally, on Railway, or any other server.")
-        else:
-            print(f"[ERROR] Bot failed to start: {e}")
-        exit(1)
+
+    if WEBHOOK_URL:
+        print(f"[Startup] Webhook mode enabled. URL: {WEBHOOK_URL}{WEBHOOK_PATH}")
+        logger.info(f"[Startup] Webhook mode enabled. URL: {WEBHOOK_URL}{WEBHOOK_PATH}")
+        try:
+            application.run_webhook(
+                listen="0.0.0.0",
+                port=WEBHOOK_PORT,
+                url_path=WEBHOOK_PATH,
+                webhook_url=WEBHOOK_URL + WEBHOOK_PATH
+            )
+        except Exception as e:
+            print(f"[ERROR] Bot failed to start in webhook mode: {e}")
+            exit(1)
+    else:
+        print("[Startup] Bot is running and polling...")
+        logger.info("[Startup] Bot is running and polling...")
+        try:
+            application.run_polling()
+        except Exception as e:
+            if 'Conflict: terminated by other getUpdates request' in str(e):
+                print("[ERROR] Telegram polling conflict: Another bot instance is running. Please ensure only one instance is active.\nIf you see this, check for other running bot processes locally, on Railway, or any other server.\n\nIf you are sure no other instance is running, try removing the lock file and restarting.")
+            else:
+                print(f"[ERROR] Bot failed to start: {e}")
+            remove_lockfile()
+            exit(1)
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] == "--remove-lockfile":
+        remove_lockfile()
+        print(f"Lock file {LOCKFILE_PATH} removed.")
+    else:
+        main()
 
