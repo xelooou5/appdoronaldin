@@ -1,7 +1,8 @@
-google-generativeai
+google-genai
 python-telegram-bot
 python-dotenv
 Pillow
 openai
 requests
-
+fastapi
+uvicorn
