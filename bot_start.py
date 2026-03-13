@@ -13,7 +13,8 @@ import base64
 # Database
 from database import Database
 
-# --- PYTHON VERSION CHECK ---
+ # --- PYTHON VERSION CHECK ---
+# Deployment trigger: 2026-03-13 - force redeploy for webhook mode test
 import sys
 import atexit
 import tempfile
