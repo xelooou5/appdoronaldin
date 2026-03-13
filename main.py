@@ -9,8 +9,9 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 import google.generativeai as genai
 from PIL import Image
 import openai
-import http.server
-import socketserver
+# Use FastAPI for health checks
+from fastapi import FastAPI
+import uvicorn
 
 # Load environment variables
 load_dotenv()
@@ -330,31 +331,10 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 def main():
-    # Heartbeat function to keep Railway build alive
-    def heartbeat():
-        import time
-        while True:
-            print("[Heartbeat] Bot alive")
-            time.sleep(30)
-
-    # Minimal HTTP server for Railway
-    def run_http_server():
-        class Handler(http.server.SimpleHTTPRequestHandler):
-            def do_GET(self):
-                self.send_response(200)
-                self.send_header("Content-type", "text/html")
-                self.end_headers()
-                self.wfile.write(b"<html><body><h1>AppDoronaldin Bot Alive</h1></body></html>")
-        port = int(os.getenv("PORT", "8080"))
-        with socketserver.TCPServer(("0.0.0.0", port), Handler) as httpd:
-            print(f"[HTTP] Serving on port {port}...")
-            httpd.serve_forever()
-
-    threading.Thread(target=heartbeat, daemon=True).start()
     print("[Startup] Checking environment variables...")
     print(f"TELEGRAM_TOKEN: {'set' if TELEGRAM_TOKEN else 'missing'}")
     print(f"GEMINI_API_KEY: {'set' if GEMINI_API_KEY else 'missing'}")
-    print(f"GROQ_API_KEY: {'set' if GROQ_API_KEY else 'missing'}")
+    print(f"GROQ_API_KEY: {'set' if GEMINI_API_KEY else 'missing'}")
     print(f"DEEPSEEK_API_KEY: {'set' if DEEPSEEK_API_KEY else 'missing'}")
     print(f"CODEGEEX_API_KEY: {'set' if CODEGEEX_API_KEY else 'missing'}")
     print(f"OPENAI_API_KEY: {'set' if OPENAI_API_KEY else 'missing'}")
@@ -363,7 +343,14 @@ def main():
         print("[ERROR] TELEGRAM_TOKEN not found in .env file. Exiting.")
         exit(1)
 
-    def start_bot():
+    # FastAPI app for health check
+    app = FastAPI()
+
+    @app.get("/")
+    async def root():
+        return {"status": "AppDoronaldin Bot Alive"}
+
+    async def start_bot():
         try:
             application = Application.builder().token(TELEGRAM_TOKEN).build()
 
@@ -380,13 +367,23 @@ def main():
             application.add_handler(conv_handler)
 
             print("[Startup] Bot is running and polling...")
-            application.run_polling()
+            await application.run_polling()
         except Exception as e:
             print(f"[ERROR] Bot failed to start: {e}")
             exit(1)
 
-    threading.Thread(target=start_bot, daemon=True).start()
-    run_http_server()
+    async def main_async():
+        # Start bot and FastAPI together
+        bot_task = asyncio.create_task(start_bot())
+        # Run FastAPI with uvicorn
+        port = int(os.getenv("PORT", "8080"))
+        config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
+        server = uvicorn.Server(config)
+        server_task = asyncio.create_task(server.serve())
+        await asyncio.gather(bot_task, server_task)
+
+    # Run the async main
+    asyncio.run(main_async())
 
 if __name__ == "__main__":
     main()
