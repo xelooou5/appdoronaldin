@@ -1,5 +1,5 @@
-google-genai
 python-telegram-bot
+google-generativeai
 python-dotenv
 Pillow
 openai
@@ -7,5 +7,6 @@ requests
 fastapi
 uvicorn
 groq
-deepseek
-codegeex
+# deepseek and codegeex SDKs might not be standard.
+# We will use 'requests' for them if the specific SDKs are causing bloat or install issues.
+# For now, let's keep it minimal.

@@ -6,12 +6,14 @@ import io
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
-import google.genai as genai
+import google.generativeai as genai
 from PIL import Image
 import openai
 # Use FastAPI for health checks
 from fastapi import FastAPI
 import uvicorn
+# Database
+from database import Database
 
 # Load environment variables
 load_dotenv()
@@ -26,26 +28,35 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # Setup AI Clients
 if GROQ_API_KEY:
-    import groq
-    groq_client = groq.Client(api_key=GROQ_API_KEY)
+    try:
+        import groq
+        groq_client = groq.Client(api_key=GROQ_API_KEY)
+    except:
+        groq_client = None
 else:
     groq_client = None
 
 if DEEPSEEK_API_KEY:
-    import deepseek
-    deepseek_client = deepseek.Client(api_key=DEEPSEEK_API_KEY)
+    try:
+        import deepseek
+        deepseek_client = deepseek.Client(api_key=DEEPSEEK_API_KEY)
+    except:
+        deepseek_client = None
 else:
     deepseek_client = None
 
 if CODEGEEX_API_KEY:
-    import codegeex
-    codegeex_client = codegeex.Client(api_key=CODEGEEX_API_KEY)
+    try:
+        import codegeex
+        codegeex_client = codegeex.Client(api_key=CODEGEEX_API_KEY)
+    except:
+        codegeex_client = None
 else:
     codegeex_client = None
 
 if GEMINI_API_KEY:
-    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
-    gemini_model = gemini_client.get_model('gemini-1.5-flash')
+    genai.configure(api_key=GEMINI_API_KEY)
+    gemini_model = genai.GenerativeModel('gemini-1.5-flash')
 else:
     gemini_model = None
 
@@ -71,9 +82,27 @@ LINK_CADASTRO = "https://start.bet.br/signup?btag=CX-48705_445081"
 LINK_APP = "https://appdoronaldin.com.br/"
 LINK_GRUPO = "https://t.me/+8imjlHQtZTE1MjYx"
 
+# Initialize Database
+db = Database()
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    user = update.effective_user
     
+    # Register/Update user in DB
+    db.create_or_update_user(user.id, user.username or "", user.first_name)
+    user_data = db.get_user(user.id)
+    
+    # Check if VIP
+    if user_data and user_data['is_vip']:
+         await update.message.reply_text(
+            f"Fala {user.first_name}! Você já tem acesso liberado! 🚀\n\n"
+            f"👇 Seus links exclusivos:\n"
+            f"📱 APP: {LINK_APP}\n"
+            f"💬 Grupo VIP: {LINK_GRUPO}"
+        )
+         return ConversationHandler.END
+
     # Cancel any existing warning jobs for this user
     current_jobs = context.job_queue.get_jobs_by_name(str(chat_id) + "_2min")
     for job in current_jobs:
@@ -111,17 +140,8 @@ async def handle_yes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for job in current_jobs:
         job.schedule_removal()
 
-    if 'sim' in text or 'quero' in text or 's' in text or 'claro' in text:
+    if any(w in text for w in ['sim', 'quero', 's', 'claro', 'bora']):
         # Send videos if they exist in the current directory
-        video_files = [
-            "ronaldin-video-1-AD6f.mp4",
-            "ronaldin-video-3-fiTl.mp4",
-            "ronaldin-video-4-2YrD.mp4"
-        ]
-        
-        # We can send one of them as a "tutorial" or "intro" video if desired.
-        # For now, let's just send the first one as an example if it exists, 
-        # but wrapped in a try/except so it doesn't crash if file is missing or too large.
         try:
             if os.path.exists("ronaldin-video-1-AD6f.mp4"):
                  await update.message.reply_video(video=open("ronaldin-video-1-AD6f.mp4", 'rb'))
@@ -134,6 +154,9 @@ async def handle_yes(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Link de cadastro: {LINK_CADASTRO}"
         )
         
+        # Update DB step
+        db.set_user_step(chat_id, WAITING_FOR_REGISTRATION_PRINT)
+
         # Schedule warning after 5 minutes
         context.job_queue.run_once(
             send_warning_5min, 
@@ -158,40 +181,8 @@ async def send_warning_5min(context: ContextTypes.DEFAULT_TYPE):
 # Multi-AI image analysis abstraction
 async def multi_ai_analyze_image(image_bytes, prompt):
     logger.info("[AI] Starting multi-AI image analysis...")
-    # Try Groq first
-    if groq_client:
-        try:
-            logger.info("[AI] Trying Groq...")
-            # Placeholder for Groq image analysis
-            # Example: response = await groq_client.analyze_image(image_bytes, prompt)
-            # if response:
-            #     return response
-            pass
-        except Exception as e:
-            logger.error(f"Groq failed: {e}")
-    # Try DeepSeek
-    if deepseek_client:
-        try:
-            logger.info("[AI] Trying DeepSeek...")
-            # Placeholder for DeepSeek image analysis
-            # Example: response = await deepseek_client.analyze_image(image_bytes, prompt)
-            # if response:
-            #     return response
-            pass
-        except Exception as e:
-            logger.error(f"DeepSeek failed: {e}")
-    # Try CodeGeeX
-    if codegeex_client:
-        try:
-            logger.info("[AI] Trying CodeGeeX...")
-            # Placeholder for CodeGeeX image analysis
-            # Example: response = await codegeex_client.analyze_image(image_bytes, prompt)
-            # if response:
-            #     return response
-            pass
-        except Exception as e:
-            logger.error(f"CodeGeeX failed: {e}")
-    # Try Gemini
+    
+    # Try Gemini FIRST (Best for vision)
     if gemini_model:
         try:
             logger.info("[AI] Trying Gemini...")
@@ -203,7 +194,8 @@ async def multi_ai_analyze_image(image_bytes, prompt):
                 return response.text
         except Exception as e:
             logger.error(f"Gemini failed: {e}")
-    # Try OpenAI
+
+    # Try OpenAI (GPT-4o) as fallback
     if openai_client:
         try:
             logger.info("[AI] Trying OpenAI...")
@@ -229,12 +221,15 @@ async def multi_ai_analyze_image(image_bytes, prompt):
             return response.choices[0].message.content
         except Exception as e:
             logger.error(f"OpenAI failed: {e}")
+            
     logger.warning("[AI] All AI fallbacks failed.")
     return None
+
 # Admin/manual override command
 async def admin_override(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if str(chat_id) in os.getenv("ADMIN_IDS", "").split(","):
+        db.set_vip(chat_id, True)
         await update.message.reply_text("Override: acesso liberado manualmente pelo admin.")
         await update.message.reply_text(
             f"📲 Link de acesso ao app: {LINK_APP}\n"
@@ -287,6 +282,14 @@ async def handle_registration_print(update: Update, context: ContextTypes.DEFAUL
                 "Para ativar o app e copiar os sinais, você precisa ter saldo na corretora.\n"
                 "Faça um depósito (mínimo R$ 20,00) e me mande o print do saldo atualizado para eu liberar seu acesso!"
             )
+            # Send tutorial video for deposit
+            try:
+                if os.path.exists("ronaldin-video-3-fiTl.mp4"):
+                    await update.message.reply_video(video=open("ronaldin-video-3-fiTl.mp4", 'rb'))
+            except Exception as e:
+                logger.error(f"Failed to send video: {e}")
+
+            db.set_user_step(chat_id, WAITING_FOR_DEPOSIT_PRINT)
             return WAITING_FOR_DEPOSIT_PRINT
         else:
             await update.message.reply_text(
@@ -331,12 +334,20 @@ async def handle_deposit_print(update: Update, context: ContextTypes.DEFAULT_TYP
             pass
         
         if result and "VALIDO" in result.upper():
+            db.set_vip(chat_id, True)
             await update.message.reply_text(
                 "Show! Cadastro e depósito confirmados. Aqui estão seus acessos:\n\n"
                 f"📲 Link de acesso ao app: {LINK_APP}\n"
                 f"💬 Link do grupo do Telegram (lives): {LINK_GRUPO}\n\n"
                 "Boas apostas!"
             )
+             # Send final video
+            try:
+                if os.path.exists("ronaldin-video-4-2YrD.mp4"):
+                    await update.message.reply_video(video=open("ronaldin-video-4-2YrD.mp4", 'rb'))
+            except Exception as e:
+                logger.error(f"Failed to send video: {e}")
+                
             return ConversationHandler.END
         else:
             await update.message.reply_text(
@@ -375,6 +386,10 @@ def main():
     @app.get("/")
     async def root():
         return {"status": "AppDoronaldin Bot Alive"}
+    
+    @app.get("/health")
+    async def health():
+        return {"status": "ok"}
 
     async def start_bot():
         try:
