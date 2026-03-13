@@ -1,7 +1,4 @@
 google-generativeai
-groq
-deepseek
-codegeex
 python-telegram-bot
 python-dotenv
 Pillow
