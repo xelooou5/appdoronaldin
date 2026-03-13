@@ -345,8 +345,9 @@ def main():
                 self.send_header("Content-type", "text/html")
                 self.end_headers()
                 self.wfile.write(b"<html><body><h1>AppDoronaldin Bot Alive</h1></body></html>")
-        with socketserver.TCPServer(("0.0.0.0", 8080), Handler) as httpd:
-            print("[HTTP] Serving on port 8080...")
+        port = int(os.getenv("PORT", "8080"))
+        with socketserver.TCPServer(("0.0.0.0", port), Handler) as httpd:
+            print(f"[HTTP] Serving on port {port}...")
             httpd.serve_forever()
 
     threading.Thread(target=heartbeat, daemon=True).start()
