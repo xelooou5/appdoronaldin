@@ -1,4 +1,4 @@
-# 1. Add all changes
+powershell.exe -ExecutionPolicy Bypass -File "c:\Users\Amanda\PycharmProjects\PythonProject1\new4.sh"# 1. Add all changes
 git add .
 
 # 2. Commit the changes

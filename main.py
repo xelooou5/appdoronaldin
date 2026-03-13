@@ -427,7 +427,15 @@ def main():
         await asyncio.gather(bot_task, server_task)
 
     # Run the async main
-    asyncio.run(main_async())
+    try:
+        import asyncio
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(main_async())
+        else:
+            loop.run_until_complete(main_async())
+    except Exception:
+        asyncio.run(main_async())
 
 if __name__ == "__main__":
     main()
