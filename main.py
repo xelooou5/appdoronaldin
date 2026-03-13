@@ -417,25 +417,27 @@ def main():
             exit(1)
 
     async def main_async():
-        # Start bot and FastAPI together
-        bot_task = asyncio.create_task(start_bot())
-        # Run FastAPI with uvicorn
-        port = int(os.getenv("PORT", "8080"))
-        config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
-        server = uvicorn.Server(config)
-        server_task = asyncio.create_task(server.serve())
-        await asyncio.gather(bot_task, server_task)
+        # Start only the Telegram bot for deployment
+        await start_bot()
 
     # Run the async main
-    try:
-        import asyncio
+    import sys
+    import asyncio
+    if hasattr(sys, 'ps1') or sys.flags.interactive:
+        # Interactive mode (Jupyter, Railway, etc.)
         loop = asyncio.get_event_loop()
-        if loop.is_running():
-            loop.create_task(main_async())
-        else:
-            loop.run_until_complete(main_async())
-    except Exception:
-        asyncio.run(main_async())
+        loop.create_task(main_async())
+        loop.run_forever()
+    else:
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(main_async())
+                loop.run_forever()
+            else:
+                loop.run_until_complete(main_async())
+        except Exception:
+            asyncio.run(main_async())
 
 if __name__ == "__main__":
     main()
