@@ -9,6 +9,8 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 import google.generativeai as genai
 from PIL import Image
 import openai
+import http.server
+import socketserver
 
 # Load environment variables
 load_dotenv()
@@ -335,8 +337,20 @@ def main():
             print("[Heartbeat] Bot alive")
             time.sleep(30)
 
-    # Start heartbeat in a background thread
+    # Minimal HTTP server for Railway
+    def run_http_server():
+        class Handler(http.server.SimpleHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-type", "text/html")
+                self.end_headers()
+                self.wfile.write(b"<html><body><h1>AppDoronaldin Bot Alive</h1></body></html>")
+        with socketserver.TCPServer(("0.0.0.0", 8080), Handler) as httpd:
+            print("[HTTP] Serving on port 8080...")
+            httpd.serve_forever()
+
     threading.Thread(target=heartbeat, daemon=True).start()
+    threading.Thread(target=run_http_server, daemon=True).start()
     print("[Startup] Checking environment variables...")
     print(f"TELEGRAM_TOKEN: {'set' if TELEGRAM_TOKEN else 'missing'}")
     print(f"GEMINI_API_KEY: {'set' if GEMINI_API_KEY else 'missing'}")
