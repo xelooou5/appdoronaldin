@@ -1,4 +1,4 @@
-import threading
+ # ...existing code...
 import os
 import asyncio
 import logging
@@ -6,8 +6,8 @@ import io
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
-from telegram.request import HTTPXRequest
-import google.generativeai as genai
+ # ...existing code...
+import google.genai as genai
 from PIL import Image
 import openai
 # Database
@@ -24,12 +24,19 @@ DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 CODEGEEX_API_KEY = os.getenv("CODEGEEX_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
+ # Logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
 # Setup AI Clients
 if GROQ_API_KEY:
     try:
         import groq
         groq_client = groq.Client(api_key=GROQ_API_KEY)
-    except:
+    except Exception:
         groq_client = None
 else:
     groq_client = None
@@ -38,7 +45,7 @@ if DEEPSEEK_API_KEY:
     try:
         import deepseek
         deepseek_client = deepseek.Client(api_key=DEEPSEEK_API_KEY)
-    except:
+    except Exception:
         deepseek_client = None
 else:
     deepseek_client = None
@@ -47,14 +54,19 @@ if CODEGEEX_API_KEY:
     try:
         import codegeex
         codegeex_client = codegeex.Client(api_key=CODEGEEX_API_KEY)
-    except:
+    except Exception:
         codegeex_client = None
 else:
     codegeex_client = None
 
+# Gemini model setup for google-genai v1.2.0
 if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-    gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        gemini_model = genai.GenerativeModel("gemini-1.5-flash")
+    except Exception as e:
+        gemini_model = None
+        logger.error("[Gemini] Initialization failed: %s", e)
 else:
     gemini_model = None
 
@@ -63,12 +75,6 @@ if OPENAI_API_KEY:
 else:
     openai_client = None
 
-# Logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
 
 # States
 WAITING_FOR_YES = 1
@@ -144,7 +150,7 @@ async def handle_yes(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if os.path.exists("ronaldin-video-1-AD6f.mp4"):
                  await update.message.reply_video(video=open("ronaldin-video-1-AD6f.mp4", 'rb'))
         except Exception as e:
-            logger.error(f"Failed to send video: {e}")
+            logger.error("Failed to send video: %s", e)
 
         await update.message.reply_text(
             "Só um detalhe importante: para acessar o app, você vai usar o mesmo login e senha da plataforma StartBet, porque o aplicativo é 100% integrado a ela.\n\n"
@@ -191,7 +197,7 @@ async def multi_ai_analyze_image(image_bytes, prompt):
                 logger.info("[AI] Gemini succeeded.")
                 return response.text
         except Exception as e:
-            logger.error(f"Gemini failed: {e}")
+            logger.error("Gemini failed: %s", e)
 
     # Try OpenAI (GPT-4o) as fallback
     if openai_client:
@@ -218,7 +224,7 @@ async def multi_ai_analyze_image(image_bytes, prompt):
             logger.info("[AI] OpenAI succeeded.")
             return response.choices[0].message.content
         except Exception as e:
-            logger.error(f"OpenAI failed: {e}")
+            logger.error("OpenAI failed: %s", e)
             
     logger.warning("[AI] All AI fallbacks failed.")
     return None
@@ -285,7 +291,7 @@ async def handle_registration_print(update: Update, context: ContextTypes.DEFAUL
                 if os.path.exists("ronaldin-video-3-fiTl.mp4"):
                     await update.message.reply_video(video=open("ronaldin-video-3-fiTl.mp4", 'rb'))
             except Exception as e:
-                logger.error(f"Failed to send video: {e}")
+                logger.error("Failed to send video: %s", e)
 
             db.set_user_step(chat_id, WAITING_FOR_DEPOSIT_PRINT)
             return WAITING_FOR_DEPOSIT_PRINT
@@ -296,8 +302,8 @@ async def handle_registration_print(update: Update, context: ContextTypes.DEFAUL
                 "Tente enviar novamente."
             )
             return WAITING_FOR_REGISTRATION_PRINT
-    except Exception as e:
-        logger.error(f"Error processing registration print: {e}")
+        except Exception as e:
+            logger.error("Error processing registration print: %s", e)
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=processing_msg.message_id)
         except:
@@ -352,8 +358,8 @@ async def handle_deposit_print(update: Update, context: ContextTypes.DEFAULT_TYP
                 "Ainda não identifiquei o saldo positivo. Por favor, envie um print mostrando o saldo atualizado após o depósito."
             )
             return WAITING_FOR_DEPOSIT_PRINT
-    except Exception as e:
-        logger.error(f"Error processing deposit print: {e}")
+        except Exception as e:
+            logger.error("Error processing deposit print: %s", e)
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=processing_msg.message_id)
         except:
@@ -379,25 +385,26 @@ def main():
         exit(1)
 
 
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            WAITING_FOR_YES: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_yes)],
+            WAITING_FOR_REGISTRATION_PRINT: [MessageHandler(filters.PHOTO, handle_registration_print)],
+            WAITING_FOR_DEPOSIT_PRINT: [MessageHandler(filters.PHOTO, handle_deposit_print)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel), CommandHandler("override", admin_override)],
+    )
+    application.add_handler(conv_handler)
+    print("[Startup] Bot is running and polling...")
     try:
-        application = Application.builder().token(TELEGRAM_TOKEN).build()
-
-        conv_handler = ConversationHandler(
-            entry_points=[CommandHandler("start", start)],
-            states={
-                WAITING_FOR_YES: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_yes)],
-                WAITING_FOR_REGISTRATION_PRINT: [MessageHandler(filters.PHOTO, handle_registration_print)],
-                WAITING_FOR_DEPOSIT_PRINT: [MessageHandler(filters.PHOTO, handle_deposit_print)],
-            },
-            fallbacks=[CommandHandler("cancel", cancel), CommandHandler("override", admin_override)],
-        )
-
-        application.add_handler(conv_handler)
-
-        print("[Startup] Bot is running and polling...")
         application.run_polling()
     except Exception as e:
-        print(f"[ERROR] Bot failed to start: {e}")
+        if 'Conflict: terminated by other getUpdates request' in str(e):
+            print("[ERROR] Telegram polling conflict: Another bot instance is running. Please ensure only one instance is active.")
+        else:
+            print(f"[ERROR] Bot failed to start: {e}")
         exit(1)
 
 
