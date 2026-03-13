@@ -48,7 +48,7 @@ HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
  # Logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.DEBUG
 )
 logger = logging.getLogger(__name__)
 
@@ -409,9 +409,24 @@ async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("pong")
 
 async def catch_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info("[CatchAll] Received update: %s", update)
-    # Optionally reply to show activity
-    # await update.message.reply_text("Mensagem recebida (catch-all handler)")
+    try:
+        # Try to produce a compact representation of the update for logs
+        upd_repr = None
+        if hasattr(update, 'to_dict'):
+            upd_repr = update.to_dict()
+        else:
+            upd_repr = str(update)
+    except Exception:
+        upd_repr = str(update)
+    logger.debug("[CatchAll] Received update: %s", upd_repr)
+    # Diagnostic reply to confirm handler is active and webhook is delivering updates
+    try:
+        if hasattr(update, 'message') and update.message:
+            await update.message.reply_text("[DEBUG] Mensagem recebida pelo catch-all handler. O bot está online e recebeu sua mensagem.")
+        else:
+            logger.info("[CatchAll] Update received without message field: %s", update)
+    except Exception:
+        logger.exception("[CatchAll] Failed to send diagnostic reply")
 
 def main():
     print("[Startup] Checking environment variables...")
@@ -427,8 +442,11 @@ def main():
         exit(1)
 
     WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-    WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "8443"))
-    WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", f"/webhook/{TELEGRAM_TOKEN}")
+    # Prefer the platform-provided PORT (Railway sets PORT). Fall back to WEBHOOK_PORT or 8443.
+    WEBHOOK_PORT = int(os.getenv("PORT", os.getenv("WEBHOOK_PORT", "8443")))
+    # Normalize path (ensure leading slash for printing, but run_webhook wants path without leading slash)
+    raw_path = os.getenv("WEBHOOK_PATH", f"/webhook/{TELEGRAM_TOKEN}")
+    WEBHOOK_PATH = raw_path if raw_path.startswith("/") else "/" + raw_path
 
     # --- LOCK FILE CHECK ---
     try:
@@ -467,18 +485,44 @@ def main():
     # Add catch-all handler for diagnostics
     application.add_handler(MessageHandler(filters.ALL, catch_all))
 
+    # --- Startup diagnostics: verify Telegram token and webhook info ---
+    def check_telegram_webhook():
+        try:
+            tg_base = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+            resp_getme = requests.post(tg_base + "/getMe", timeout=10)
+            logger.info("[StartupDiag] getMe status: %s %s", resp_getme.status_code, resp_getme.text)
+        except Exception as e:
+            logger.exception("[StartupDiag] getMe failed: %s", e)
+        try:
+            resp_wh = requests.post(tg_base + "/getWebhookInfo", timeout=10)
+            logger.info("[StartupDiag] getWebhookInfo status: %s %s", resp_wh.status_code, resp_wh.text)
+        except Exception as e:
+            logger.exception("[StartupDiag] getWebhookInfo failed: %s", e)
+
+    # Run diagnostics synchronously before starting the webhook server (helps debug misconfig)
+    try:
+        check_telegram_webhook()
+    except Exception:
+        logger.exception("[StartupDiag] Unexpected error while checking Telegram API")
+
     if WEBHOOK_URL:
-        print(f"[Startup] Webhook mode enabled. URL: {WEBHOOK_URL}{WEBHOOK_PATH}")
-        logger.info(f"[Startup] Webhook mode enabled. URL: {WEBHOOK_URL}{WEBHOOK_PATH}")
+        # run_webhook expects url_path without leading slash
+        url_path = WEBHOOK_PATH.lstrip('/')
+        webhook_full_url = WEBHOOK_URL.rstrip('/') + '/' + url_path
+        print(f"[Startup] Webhook mode enabled. URL: {webhook_full_url} (listening on port {WEBHOOK_PORT})")
+        logger.info(f"[Startup] Webhook mode enabled. URL: {webhook_full_url} (listening on port {WEBHOOK_PORT})")
         try:
             application.run_webhook(
                 listen="0.0.0.0",
                 port=WEBHOOK_PORT,
-                url_path=WEBHOOK_PATH,
-                webhook_url=WEBHOOK_URL + WEBHOOK_PATH
+                url_path=url_path,
+                webhook_url=webhook_full_url,
+                max_connections=40,
+                drop_pending_updates=False,
             )
         except Exception as e:
             print(f"[ERROR] Bot failed to start in webhook mode: {e}")
+            logger.exception("Bot failed to start in webhook mode")
             exit(1)
     else:
         print("[Startup] Bot is running and polling...")
