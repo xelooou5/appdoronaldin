@@ -6,8 +6,10 @@ from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 from PIL import Image
+# --- AI and HTTP ---
 import openai
-import google.generativeai as genai  # Correct Gemini import
+import requests
+import base64
 # Database
 from database import Database
 
@@ -28,6 +30,10 @@ DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 CODEGEEX_API_KEY = os.getenv("CODEGEEX_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
+# New: Ecreasy and HuggingFace
+ECREASY_API_KEY = os.getenv("ECREASY_API_KEY")
+HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
+
  # Logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -35,23 +41,24 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Setup AI Clients
-# Gemini model setup for google-generativeai (correct API)
-gemini_model = None
-if GEMINI_API_KEY:
-    try:
-        genai.configure(api_key=GEMINI_API_KEY)
-        gemini_model = genai.GenerativeModel('gemini-1.5-flash')
-    except Exception as e:
-        gemini_model = None
-        logger.error("[Gemini] Initialization failed: %s", e)
-else:
-    gemini_model = None
+# Only OpenAI client setup
 
+# OpenAI client setup
 if OPENAI_API_KEY:
     openai_client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
 else:
     openai_client = None
+
+# Gemini (google-genai) setup (for fallback only)
+try:
+    import google.genai as genai
+    if GEMINI_API_KEY:
+        genai.configure(api_key=GEMINI_API_KEY)
+        gemini_model = genai.GenerativeModel("gemini-1.5-flash")
+    else:
+        gemini_model = None
+except Exception:
+    gemini_model = None
 
 
 # States
@@ -160,28 +167,51 @@ async def send_warning_5min(context: ContextTypes.DEFAULT_TYPE):
         text=f"Ainda não se cadastrou? Entre no grupo para acompanhar as lives: {LINK_GRUPO}"
     )
 
-# Multi-AI image analysis abstraction
+# Multi-AI image analysis abstraction (now OpenAI only)
+
+# Modular multi-AI image analysis abstraction
 async def multi_ai_analyze_image(image_bytes, prompt):
     logger.info("[AI] Starting multi-AI image analysis...")
-    
-    # Try Gemini FIRST (Best for vision)
-    if gemini_model:
-        try:
-            logger.info("[AI] Trying Gemini...")
-            loop = asyncio.get_running_loop()
-            image = Image.open(io.BytesIO(image_bytes))
-            response = await loop.run_in_executor(None, lambda: gemini_model.generate_content([prompt, image]))
-            if response and hasattr(response, 'text') and response.text:
-                logger.info("[AI] Gemini succeeded.")
-                return response.text
-        except Exception as e:
-            logger.error("Gemini failed: %s", e)
 
-    # Try OpenAI (GPT-4o) as fallback
+    # 1. Ecreasy Vision API (https://ecreasy.com/vision-api/)
+    if ECREASY_API_KEY:
+        try:
+            logger.info("[AI] Trying Ecreasy Vision API...")
+            ecreasy_url = "https://api.ecreasy.com/v1/vision/ocr"
+            files = {"image": ("image.jpg", image_bytes, "image/jpeg")}
+            headers = {"Authorization": f"Bearer {ECREASY_API_KEY}"}
+            data = {"prompt": prompt}
+            resp = requests.post(ecreasy_url, headers=headers, files=files, data=data, timeout=30)
+            if resp.status_code == 200:
+                result = resp.json()
+                if "result" in result and result["result"]:
+                    logger.info("[AI] Ecreasy succeeded.")
+                    return result["result"]
+            logger.warning(f"[AI] Ecreasy failed: {resp.text}")
+        except Exception as e:
+            logger.error(f"Ecreasy Vision API failed: {e}")
+
+    # 2. HuggingFace Inference API (e.g., BLIP, TrOCR, Donut)
+    if HUGGINGFACE_API_KEY:
+        try:
+            logger.info("[AI] Trying HuggingFace Inference API...")
+            hf_url = "https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-base"
+            headers = {"Authorization": f"Bearer {HUGGINGFACE_API_KEY}"}
+            resp = requests.post(hf_url, headers=headers, data=image_bytes, timeout=30)
+            if resp.status_code == 200:
+                result = resp.json()
+                # BLIP returns a list of dicts with 'generated_text'
+                if isinstance(result, list) and result and "generated_text" in result[0]:
+                    logger.info("[AI] HuggingFace succeeded.")
+                    return result[0]["generated_text"]
+            logger.warning(f"[AI] HuggingFace failed: {resp.text}")
+        except Exception as e:
+            logger.error(f"HuggingFace Inference API failed: {e}")
+
+    # 3. OpenAI Vision (GPT-4o)
     if openai_client:
         try:
             logger.info("[AI] Trying OpenAI...")
-            import base64
             base64_image = base64.b64encode(image_bytes).decode('utf-8')
             response = await openai_client.chat.completions.create(
                 model="gpt-4o-mini",
@@ -203,8 +233,22 @@ async def multi_ai_analyze_image(image_bytes, prompt):
             return response.choices[0].message.content
         except Exception as e:
             logger.error("OpenAI failed: %s", e)
-            
-    logger.warning("[AI] All AI fallbacks failed.")
+
+    # 4. Gemini (Google GenAI) as backup only
+    if gemini_model:
+        try:
+            logger.info("[AI] Trying Gemini (backup)...")
+            import io as _io
+            image = Image.open(_io.BytesIO(image_bytes))
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(None, lambda: gemini_model.generate_content([prompt, image]))
+            if response and hasattr(response, 'text') and response.text:
+                logger.info("[AI] Gemini succeeded.")
+                return response.text
+        except Exception as e:
+            logger.error("Gemini failed: %s", e)
+
+    logger.warning("[AI] All AI image analysis services failed.")
     return None
 
 # Admin/manual override command
