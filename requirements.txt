@@ -1,11 +1,9 @@
-python-telegram-bot
+ python-telegram-bot==20.3
 google-generativeai
 python-dotenv
 Pillow
 openai
 requests
-fastapi
-uvicorn
 groq
 # deepseek and codegeex SDKs might not be standard.
 # We will use 'requests' for them if the specific SDKs are causing bloat or install issues.

@@ -10,9 +10,6 @@ from telegram.request import HTTPXRequest
 import google.generativeai as genai
 from PIL import Image
 import openai
-# Use FastAPI for health checks
-from fastapi import FastAPI
-import uvicorn
 # Database
 from database import Database
 
@@ -324,7 +321,7 @@ async def handle_deposit_print(update: Update, context: ContextTypes.DEFAULT_TYP
         prompt = (
             "Você é um assistente verificando prints de depósito em casas de apostas. "
             "Analise a imagem e responda 'VALIDO' se o print for da plataforma m.start.bet.br, com o link m.start.bet.br visível no topo ou embaixo da tela (dependendo do celular), "
-            "e saldo maior que 0 (positivo) no mesmo lugar que aparece na LuckBet. Responda 'INVALIDO' se o saldo for 0, se o link não estiver visível, ou se não for possível identificar."
+            "e saldo maior que R$ 10,00 (positivo, acima de dez reais) no mesmo lugar que aparece na LuckBet. Responda 'INVALIDO' se o saldo for 10 ou menos, se o link não estiver visível, ou se não for possível identificar."
         )
         
         result = await multi_ai_analyze_image(image_bytes, prompt)
@@ -381,63 +378,28 @@ def main():
         print("[ERROR] TELEGRAM_TOKEN not found in .env file. Exiting.")
         exit(1)
 
-    # FastAPI app for health check
-    app = FastAPI()
 
-    @app.get("/")
-    async def root():
-        return {"status": "AppDoronaldin Bot Alive"}
-    
-    @app.get("/health")
-    async def health():
-        return {"status": "ok"}
+    try:
+        application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    async def start_bot():
-        try:
-            # Use HTTPXRequest with http_version 1.1 to avoid connection issues
-            request = HTTPXRequest(http_version="1.1")
-            application = Application.builder().token(TELEGRAM_TOKEN).request(request).build()
+        conv_handler = ConversationHandler(
+            entry_points=[CommandHandler("start", start)],
+            states={
+                WAITING_FOR_YES: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_yes)],
+                WAITING_FOR_REGISTRATION_PRINT: [MessageHandler(filters.PHOTO, handle_registration_print)],
+                WAITING_FOR_DEPOSIT_PRINT: [MessageHandler(filters.PHOTO, handle_deposit_print)],
+            },
+            fallbacks=[CommandHandler("cancel", cancel), CommandHandler("override", admin_override)],
+        )
 
-            conv_handler = ConversationHandler(
-                entry_points=[CommandHandler("start", start)],
-                states={
-                    WAITING_FOR_YES: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_yes)],
-                    WAITING_FOR_REGISTRATION_PRINT: [MessageHandler(filters.PHOTO, handle_registration_print)],
-                    WAITING_FOR_DEPOSIT_PRINT: [MessageHandler(filters.PHOTO, handle_deposit_print)],
-                },
-                fallbacks=[CommandHandler("cancel", cancel), CommandHandler("override", admin_override)],
-            )
+        application.add_handler(conv_handler)
 
-            application.add_handler(conv_handler)
+        print("[Startup] Bot is running and polling...")
+        application.run_polling()
+    except Exception as e:
+        print(f"[ERROR] Bot failed to start: {e}")
+        exit(1)
 
-            print("[Startup] Bot is running and polling...")
-            await application.run_polling()
-        except Exception as e:
-            print(f"[ERROR] Bot failed to start: {e}")
-            exit(1)
-
-    async def main_async():
-        # Start only the Telegram bot for deployment
-        await start_bot()
-
-    # Run the async main
-    import sys
-    import asyncio
-    if hasattr(sys, 'ps1') or sys.flags.interactive:
-        # Interactive mode (Jupyter, Railway, etc.)
-        loop = asyncio.get_event_loop()
-        loop.create_task(main_async())
-        loop.run_forever()
-    else:
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop.create_task(main_async())
-                loop.run_forever()
-            else:
-                loop.run_until_complete(main_async())
-        except Exception:
-            asyncio.run(main_async())
 
 if __name__ == "__main__":
     main()
