@@ -350,7 +350,6 @@ def main():
             httpd.serve_forever()
 
     threading.Thread(target=heartbeat, daemon=True).start()
-    threading.Thread(target=run_http_server, daemon=True).start()
     print("[Startup] Checking environment variables...")
     print(f"TELEGRAM_TOKEN: {'set' if TELEGRAM_TOKEN else 'missing'}")
     print(f"GEMINI_API_KEY: {'set' if GEMINI_API_KEY else 'missing'}")
@@ -363,26 +362,30 @@ def main():
         print("[ERROR] TELEGRAM_TOKEN not found in .env file. Exiting.")
         exit(1)
 
-    try:
-        application = Application.builder().token(TELEGRAM_TOKEN).build()
+    def start_bot():
+        try:
+            application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-        conv_handler = ConversationHandler(
-            entry_points=[CommandHandler("start", start)],
-            states={
-                WAITING_FOR_YES: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_yes)],
-                WAITING_FOR_REGISTRATION_PRINT: [MessageHandler(filters.PHOTO, handle_registration_print)],
-                WAITING_FOR_DEPOSIT_PRINT: [MessageHandler(filters.PHOTO, handle_deposit_print)],
-            },
-            fallbacks=[CommandHandler("cancel", cancel), CommandHandler("override", admin_override)],
-        )
+            conv_handler = ConversationHandler(
+                entry_points=[CommandHandler("start", start)],
+                states={
+                    WAITING_FOR_YES: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_yes)],
+                    WAITING_FOR_REGISTRATION_PRINT: [MessageHandler(filters.PHOTO, handle_registration_print)],
+                    WAITING_FOR_DEPOSIT_PRINT: [MessageHandler(filters.PHOTO, handle_deposit_print)],
+                },
+                fallbacks=[CommandHandler("cancel", cancel), CommandHandler("override", admin_override)],
+            )
 
-        application.add_handler(conv_handler)
+            application.add_handler(conv_handler)
 
-        print("[Startup] Bot is running and polling...")
-        application.run_polling()
-    except Exception as e:
-        print(f"[ERROR] Bot failed to start: {e}")
-        exit(1)
+            print("[Startup] Bot is running and polling...")
+            application.run_polling()
+        except Exception as e:
+            print(f"[ERROR] Bot failed to start: {e}")
+            exit(1)
+
+    threading.Thread(target=start_bot, daemon=True).start()
+    run_http_server()
 
 if __name__ == "__main__":
     main()
