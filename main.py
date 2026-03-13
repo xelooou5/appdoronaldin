@@ -6,7 +6,7 @@ import io
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
-import google.generativeai as genai
+import google.genai as genai
 from PIL import Image
 import openai
 # Use FastAPI for health checks
@@ -24,10 +24,28 @@ DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 CODEGEEX_API_KEY = os.getenv("CODEGEEX_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
- # Setup AI Clients
+# Setup AI Clients
+if GROQ_API_KEY:
+    import groq
+    groq_client = groq.Client(api_key=GROQ_API_KEY)
+else:
+    groq_client = None
+
+if DEEPSEEK_API_KEY:
+    import deepseek
+    deepseek_client = deepseek.Client(api_key=DEEPSEEK_API_KEY)
+else:
+    deepseek_client = None
+
+if CODEGEEX_API_KEY:
+    import codegeex
+    codegeex_client = codegeex.Client(api_key=CODEGEEX_API_KEY)
+else:
+    codegeex_client = None
+
 if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-    gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+    gemini_model = gemini_client.get_model('gemini-1.5-flash')
 else:
     gemini_model = None
 
@@ -140,19 +158,51 @@ async def send_warning_5min(context: ContextTypes.DEFAULT_TYPE):
 # Multi-AI image analysis abstraction
 async def multi_ai_analyze_image(image_bytes, prompt):
     logger.info("[AI] Starting multi-AI image analysis...")
-    # Try Gemini first
+    # Try Groq first
+    if groq_client:
+        try:
+            logger.info("[AI] Trying Groq...")
+            # Placeholder for Groq image analysis
+            # Example: response = await groq_client.analyze_image(image_bytes, prompt)
+            # if response:
+            #     return response
+            pass
+        except Exception as e:
+            logger.error(f"Groq failed: {e}")
+    # Try DeepSeek
+    if deepseek_client:
+        try:
+            logger.info("[AI] Trying DeepSeek...")
+            # Placeholder for DeepSeek image analysis
+            # Example: response = await deepseek_client.analyze_image(image_bytes, prompt)
+            # if response:
+            #     return response
+            pass
+        except Exception as e:
+            logger.error(f"DeepSeek failed: {e}")
+    # Try CodeGeeX
+    if codegeex_client:
+        try:
+            logger.info("[AI] Trying CodeGeeX...")
+            # Placeholder for CodeGeeX image analysis
+            # Example: response = await codegeex_client.analyze_image(image_bytes, prompt)
+            # if response:
+            #     return response
+            pass
+        except Exception as e:
+            logger.error(f"CodeGeeX failed: {e}")
+    # Try Gemini
     if gemini_model:
         try:
             logger.info("[AI] Trying Gemini...")
             loop = asyncio.get_running_loop()
             image = Image.open(io.BytesIO(image_bytes))
             response = await loop.run_in_executor(None, lambda: gemini_model.generate_content([prompt, image]))
-            if response and response.text:
+            if response and hasattr(response, 'text') and response.text:
                 logger.info("[AI] Gemini succeeded.")
                 return response.text
         except Exception as e:
             logger.error(f"Gemini failed: {e}")
-
     # Try OpenAI
     if openai_client:
         try:
@@ -179,30 +229,6 @@ async def multi_ai_analyze_image(image_bytes, prompt):
             return response.choices[0].message.content
         except Exception as e:
             logger.error(f"OpenAI failed: {e}")
-    # Try Groq (if API key provided)
-    if GROQ_API_KEY:
-        try:
-            logger.info("[AI] Trying Groq...")
-            # Placeholder for Groq image analysis
-            pass
-        except Exception as e:
-            logger.error(f"Groq failed: {e}")
-    # Try DeepSeek (if API key provided)
-    if DEEPSEEK_API_KEY:
-        try:
-            logger.info("[AI] Trying DeepSeek...")
-            # Placeholder for DeepSeek image analysis
-            pass
-        except Exception as e:
-            logger.error(f"DeepSeek failed: {e}")
-    # Try CodeGeeX (if API key provided)
-    if CODEGEEX_API_KEY:
-        try:
-            logger.info("[AI] Trying CodeGeeX...")
-            # Placeholder for CodeGeeX image analysis
-            pass
-        except Exception as e:
-            logger.error(f"CodeGeeX failed: {e}")
     logger.warning("[AI] All AI fallbacks failed.")
     return None
 # Admin/manual override command
