@@ -6,6 +6,7 @@ import io
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+from telegram.request import HTTPXRequest
 import google.generativeai as genai
 from PIL import Image
 import openai
@@ -393,7 +394,9 @@ def main():
 
     async def start_bot():
         try:
-            application = Application.builder().token(TELEGRAM_TOKEN).build()
+            # Use HTTPXRequest with http_version 1.1 to avoid connection issues
+            request = HTTPXRequest(http_version="1.1")
+            application = Application.builder().token(TELEGRAM_TOKEN).request(request).build()
 
             conv_handler = ConversationHandler(
                 entry_points=[CommandHandler("start", start)],
