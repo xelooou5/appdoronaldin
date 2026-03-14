@@ -1,832 +1,303 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 import os
-import asyncio
+import sys
 import logging
-import io
+import re
+import uuid
+from datetime import datetime
+from pathlib import Path
 from dotenv import load_dotenv
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler, CallbackQueryHandler
-from PIL import Image
-# --- AI and HTTP ---
-import openai
-import requests
-import base64
-# Database
-from database import Database
-from validador_vision import validar_print
-from chat_ia import chat_ia
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+load_dotenv()
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, CallbackQueryHandler, filters
 from telegram.request import HTTPXRequest
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+import pytz
 
- # --- PYTHON VERSION CHECK ---
-# Deployment trigger: 2026-03-13 - force redeploy for webhook mode test
-import sys
-import atexit
-import tempfile
-LOCKFILE_PATH = os.path.join(tempfile.gettempdir(), 'appronaldin_bot.lock')
+from database import Database
+from validador_vision import validar_print
+from chat_ia import ChatIA
 
-def remove_lockfile():
-    try:
-        if os.path.exists(LOCKFILE_PATH):
-            os.remove(LOCKFILE_PATH)
-    except Exception as e:
-        print(f"[ERROR] Could not remove lock file: {e}")
-if sys.version_info < (3, 8):
-    print("[ERROR] Python 3.8+ is required. Current version:", sys.version)
-    exit(1)
-
-# Load environment variables
-load_dotenv()
-
-# Configuration
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
-CODEGEEX_API_KEY = os.getenv("CODEGEEX_API_KEY")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
-# New: Ecreasy and HuggingFace
-ECREASY_API_KEY = os.getenv("ECREASY_API_KEY")
-HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
-
- # Logging
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.DEBUG
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)-8s | %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
 )
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
-# Only OpenAI client setup
+BASE_DIR = Path(__file__).parent
+PRINTS_DIR = BASE_DIR / 'auditoria_prints'
+PRINTS_DIR.mkdir(exist_ok=True)
 
-# OpenAI client setup
-if OPENAI_API_KEY:
-    openai_client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
-else:
-    openai_client = None
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+if not TELEGRAM_TOKEN:
+    log.error("TELEGRAM_TOKEN não configurado!")
+    sys.exit(1)
 
-# Gemini (google-genai) setup (for fallback only)
-try:
-    import google.genai as genai
-    if GEMINI_API_KEY:
-        genai.configure(api_key=GEMINI_API_KEY)
-        gemini_model = genai.GenerativeModel("gemini-1.5-flash")
-    else:
-        gemini_model = None
-except Exception:
-    gemini_model = None
+# StartBet Links
+LINK_CADASTRO = 'https://start.bet.br/signup?btag=CX-48705_445081'
+LINK_APP = 'https://appdoronaldin.com.br/'
+LINK_GRUPO = 'https://t.me/+8imjlHQtZTE1MjYx'
 
+BRAZIL_TZ = pytz.timezone('America/Sao_Paulo')
 
-# States
-WAITING_FOR_YES = 1
-WAITING_FOR_REGISTRATION_PRINT = 2
-WAITING_FOR_DEPOSIT_PRINT = 3
-
-# Links
-LINK_CADASTRO = "https://start.bet.br/signup?btag=CX-48705_445081"
-LINK_APP = "https://appdoronaldin.com.br/"
-LINK_GRUPO = "https://t.me/+8imjlHQtZTE1MjYx"
-
-# Initialize Database
+user_states = {}
+last_message_time = {}
 db = Database()
+chat_ia = ChatIA()
 
-# Persistent prints directory (mirror of working bot)
-BASE_DIR = os.path.dirname(__file__)
-PRINTS_DIR = os.path.join(BASE_DIR, 'auditoria_prints')
-os.makedirs(PRINTS_DIR, exist_ok=True)
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    user = update.effective_user
-    
-    # Register/Update user in DB
-    db.create_or_update_user(user.id, user.username or "", user.first_name)
-    user_data = db.get_user(user.id)
-    
-    # Check if VIP
-    if user_data and user_data['is_vip']:
-         await update.message.reply_text(
-            f"Fala {user.first_name}! Você já tem acesso liberado! 🚀\n\n"
-            f"👇 Seus links exclusivos:\n"
-            f"📱 APP: {LINK_APP}\n"
-            f"💬 Grupo VIP: {LINK_GRUPO}"
-        )
-         return ConversationHandler.END
-
-    # Cancel any existing warning jobs for this user
-    current_jobs = context.job_queue.get_jobs_by_name(str(chat_id) + "_2min")
-    for job in current_jobs:
-        job.schedule_removal()
-    
-    await update.message.reply_text(
-        "Opa! Tudo certo? Quer acesso ao app e ao grupo gratuito de sinais?"
-    )
-    
-    # Schedule warning message after 2 minutes
-    context.job_queue.run_once(
-        send_warning_2min, 
-        120, 
-        chat_id=chat_id,
-        name=str(chat_id) + "_2min",
-        data=chat_id
-    )
-    
-    return WAITING_FOR_YES
-
-async def send_warning_2min(context: ContextTypes.DEFAULT_TYPE):
-    job = context.job
-    chat_id = job.data
-    await context.bot.send_message(
-        chat_id=chat_id, 
-        text="⚠️ Aviso importante:\nO app começará a ser pago a partir de amanhã.\nHoje é sua última chance de garantir acesso gratuito.\nQuer acesso ao app?"
-    )
-
-async def handle_yes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    text = update.message.text.lower()
-    
-    # Cancel the 2 min warning job if it exists
-    current_jobs = context.job_queue.get_jobs_by_name(str(chat_id) + "_2min")
-    for job in current_jobs:
-        job.schedule_removal()
-
-    if any(w in text for w in ['sim', 'quero', 's', 'claro', 'bora']):
-        # Send videos if they exist in the current directory
-        try:
-            if os.path.exists("ronaldin-video-1-AD6f.mp4"):
-                 await update.message.reply_video(video=open("ronaldin-video-1-AD6f.mp4", 'rb'))
-        except Exception as e:
-            logger.error("Failed to send video: %s", e)
-
-        await update.message.reply_text(
-            "Só um detalhe importante: para acessar o app, você vai usar o mesmo login e senha da plataforma StartBet, porque o aplicativo é 100% integrado a ela.\n\n"
-            "Então é bem simples: crie sua conta na StartBet e me envie o print confirmando o cadastro. Assim que mandar, libero seu acesso ao app 👊\n"
-            f"Link de cadastro: {LINK_CADASTRO}"
-        )
-        
-        # Update DB step
-        db.set_user_step(chat_id, WAITING_FOR_REGISTRATION_PRINT)
-
-        # Schedule warning after 5 minutes
-        context.job_queue.run_once(
-            send_warning_5min, 
-            300, 
-            chat_id=chat_id,
-            name=str(chat_id) + "_5min",
-            data=chat_id
-        )
-        return WAITING_FOR_REGISTRATION_PRINT
-    else:
-        await update.message.reply_text("Responda com 'sim' para continuar.")
-        return WAITING_FOR_YES
-
-async def send_warning_5min(context: ContextTypes.DEFAULT_TYPE):
-    job = context.job
-    chat_id = job.data
-    await context.bot.send_message(
-        chat_id=chat_id, 
-        text=f"Ainda não se cadastrou? Entre no grupo para acompanhar as lives: {LINK_GRUPO}"
-    )
-
-# Multi-AI image analysis abstraction (now OpenAI only)
-
-# Modular multi-AI image analysis abstraction
-async def multi_ai_analyze_image(image_bytes, prompt):
-    logger.info("[AI] Starting multi-AI image analysis...")
-
-    # 1. Ecreasy Vision API (https://ecreasy.com/vision-api/)
-    if ECREASY_API_KEY:
-        try:
-            logger.info("[AI] Trying Ecreasy Vision API...")
-            ecreasy_url = "https://api.ecreasy.com/v1/vision/ocr"
-            files = {"image": ("image.jpg", image_bytes, "image/jpeg")}
-            headers = {"Authorization": f"Bearer {ECREASY_API_KEY}"}
-            data = {"prompt": prompt}
-            resp = requests.post(ecreasy_url, headers=headers, files=files, data=data, timeout=30)
-            if resp.status_code == 200:
-                result = resp.json()
-                if "result" in result and result["result"]:
-                    logger.info("[AI] Ecreasy succeeded.")
-                    return result["result"]
-            logger.warning(f"[AI] Ecreasy failed: {resp.text}")
-        except Exception as e:
-            logger.error(f"Ecreasy Vision API failed: {e}")
-
-    # 2. HuggingFace Inference API (e.g., BLIP, TrOCR, Donut)
-    if HUGGINGFACE_API_KEY:
-        try:
-            logger.info("[AI] Trying HuggingFace Inference API...")
-            hf_url = "https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-base"
-            headers = {"Authorization": f"Bearer {HUGGINGFACE_API_KEY}"}
-            resp = requests.post(hf_url, headers=headers, data=image_bytes, timeout=30)
-            if resp.status_code == 200:
-                result = resp.json()
-                # BLIP returns a list of dicts with 'generated_text'
-                if isinstance(result, list) and result and "generated_text" in result[0]:
-                    logger.info("[AI] HuggingFace succeeded.")
-                    return result[0]["generated_text"]
-            logger.warning(f"[AI] HuggingFace failed: {resp.text}")
-        except Exception as e:
-            logger.error(f"HuggingFace Inference API failed: {e}")
-
-    # 3. OpenAI Vision (GPT-4o)
-    if openai_client:
-        try:
-            logger.info("[AI] Trying OpenAI...")
-            base64_image = base64.b64encode(image_bytes).decode('utf-8')
-            response = await openai_client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"},
-                            },
-                        ],
-                    }
-                ],
-                max_tokens=300,
-            )
-            logger.info("[AI] OpenAI succeeded.")
-            return response.choices[0].message.content
-        except Exception as e:
-            logger.error("OpenAI failed: %s", e)
-
-    # 4. Gemini (Google GenAI) as backup only
-    if gemini_model:
-        try:
-            logger.info("[AI] Trying Gemini (backup)...")
-            import io as _io
-            image = Image.open(_io.BytesIO(image_bytes))
-            loop = asyncio.get_running_loop()
-            response = await loop.run_in_executor(None, lambda: gemini_model.generate_content([prompt, image]))
-            if response and hasattr(response, 'text') and response.text:
-                logger.info("[AI] Gemini succeeded.")
-                return response.text
-        except Exception as e:
-            logger.error("Gemini failed: %s", e)
-
-    logger.warning("[AI] All AI image analysis services failed.")
-    return None
-
-# Admin/manual override command
-async def admin_override(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    if str(chat_id) in os.getenv("ADMIN_IDS", "").split(","):
-        db.set_vip(chat_id, True)
-        await update.message.reply_text("Override: acesso liberado manualmente pelo admin.")
-        await update.message.reply_text(
-            f"📲 Link de acesso ao app: {LINK_APP}\n"
-            f"💬 Link do grupo do Telegram (lives): {LINK_GRUPO}\n\n"
-            "Boas apostas!"
-        )
-        return ConversationHandler.END
-    else:
-        await update.message.reply_text("Você não tem permissão para usar este comando.")
-        return ConversationHandler.END
-
-async def handle_registration_print(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-
-    # Cancel the 5 min warning job if it exists
-    current_jobs = context.job_queue.get_jobs_by_name(str(chat_id) + "_5min")
-    for job in current_jobs:
-        job.schedule_removal()
-
-    if not update.message.photo:
-        await update.message.reply_text("Por favor, envie o print da tela de cadastro.")
-        return WAITING_FOR_REGISTRATION_PRINT
-
-    processing_msg = await update.message.reply_text("Analisando seu print, aguarde um momento...")
-
-    try:
-        photo = update.message.photo[-1]
-        file = await context.bot.get_file(photo.file_id)
-        image_bytes = await file.download_as_bytearray()
-
-        # Save incoming photo to persistent prints dir and try local OCR validator
-        try:
-            import uuid as _uuid
-            safe_filename = f"{chat_id}_{str(_uuid.uuid4())[:8]}.jpg"
-            fp = os.path.join(PRINTS_DIR, safe_filename)
-            with open(fp, 'wb') as _f:
-                _f.write(image_bytes)
-            logger.info("Saved registration print to %s", fp)
-            ok_val, val_msg = await validar_print(fp)
-        except Exception as _e:
-            logger.debug("Local OCR validator failed: %s", _e)
-            ok_val, val_msg = (False, None)
-
-        prompt = (
-            "Você é um assistente verificando prints de cadastro em casas de apostas. "
-            "Analise a imagem e responda 'VALIDO' se parecer um print de uma conta logada na plataforma m.start.bet.br, "
-            "com o link m.start.bet.br visível no topo ou embaixo da tela (dependendo do celular), e saldo 0,00 (ou próximo de zero) "
-            "no mesmo lugar que aparece na LuckBet. Responda 'INVALIDO' se não parecer uma conta logada, se o link não estiver visível, "
-            "ou se for algo totalmente diferente."
-        )
-
-        result = await multi_ai_analyze_image(image_bytes, prompt)
-
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=processing_msg.message_id)
-        except:
-            pass
-
-        # If local OCR validated and shows a zero or near-zero balance, accept as registration print
-        if ok_val:
-            # val_msg is like 'R$0.00' or 'R$12.34'
-            import re as _re
-            m = _re.search(r"(\d+[.,]\d{2})", str(val_msg))
-            if m:
-                try:
-                    bal = float(m.group(1).replace(',', '.'))
-                except Exception:
-                    bal = None
-            else:
-                bal = None
-
-            if bal is not None and bal <= 1.0:
-                # Treat as zero-balance registration
-                await update.message.reply_text(
-                    "Perfeito, vi que você já criou sua conta com saldo zerado.\n"
-                    "Agora faça um depósito (mínimo R$ 20,00) e me mande o print do saldo atualizado para eu liberar seu acesso!"
-                )
-                db.set_user_step(chat_id, WAITING_FOR_DEPOSIT_PRINT)
-                logger.info("Registration print kept at %s", fp)
-                return WAITING_FOR_DEPOSIT_PRINT
-            else:
-                # If OCR found a positive balance, move directly to deposit step
-                if bal is not None and bal > 1.0:
-                    await update.message.reply_text(
-                        "Vi que sua conta já tem saldo positivo. Vou pedir apenas o print do depósito atualizado para confirmar e liberar o acesso."
-                    )
-                    db.set_user_step(chat_id, WAITING_FOR_DEPOSIT_PRINT)
-                    logger.info("Registration print kept at %s", fp)
-                    return WAITING_FOR_DEPOSIT_PRINT
-
-        # Fallback to AI analysis if OCR didn't clearly validate
-        if result and "VALIDO" in result.upper():
-            await update.message.reply_text(
-                "Perfeito, vi que você já criou sua conta.\n"
-                "Mas vi que sua conta ainda está sem saldo.\n\n"
-                "Para ativar o app e copiar os sinais, você precisa ter saldo na corretora.\n"
-                "Faça um depósito (mínimo R$ 20,00) e me mande o print do saldo atualizado para eu liberar seu acesso!"
-            )
-            # Send tutorial video for deposit
-            try:
-                if os.path.exists("ronaldin-video-3-fiTl.mp4"):
-                    await update.message.reply_video(video=open("ronaldin-video-3-fiTl.mp4", 'rb'))
-            except Exception as e:
-                logger.error("Failed to send video: %s", e)
-
-            db.set_user_step(chat_id, WAITING_FOR_DEPOSIT_PRINT)
-            return WAITING_FOR_DEPOSIT_PRINT
-        else:
-            await update.message.reply_text(
-                "Não consegui identificar o cadastro corretamente.\n"
-                "Certifique-se de que o print mostra que você está logado na plataforma.\n"
-                "Tente enviar novamente."
-            )
-            return WAITING_FOR_REGISTRATION_PRINT
-    except Exception as e:
-        logger.error("Error processing registration print: %s", e)
-    try:
-        await context.bot.delete_message(chat_id=chat_id, message_id=processing_msg.message_id)
-    except:
-        pass
-    await update.message.reply_text("Ocorreu um erro ao processar a imagem. Tente novamente.")
-    return WAITING_FOR_REGISTRATION_PRINT
-
-async def handle_deposit_print(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.photo:
-        await update.message.reply_text("Por favor, envie o print do saldo atualizado.")
-        return WAITING_FOR_DEPOSIT_PRINT
-
-    chat_id = update.effective_chat.id
-    processing_msg = await update.message.reply_text("Conferindo seu depósito...")
-
-    try:
-        photo = update.message.photo[-1]
-        file = await context.bot.get_file(photo.file_id)
-        image_bytes = await file.download_as_bytearray()
-
-        # Save incoming photo to persistent prints dir and try local OCR validator
-        try:
-            import uuid as _uuid
-            safe_filename = f"{chat_id}_{str(_uuid.uuid4())[:8]}.jpg"
-            fp = os.path.join(PRINTS_DIR, safe_filename)
-            with open(fp, 'wb') as _f:
-                _f.write(image_bytes)
-            logger.info("Saved deposit print to %s", fp)
-            ok_val, val_msg = await validar_print(fp)
-        except Exception as _e:
-            logger.debug("Local OCR validator failed: %s", _e)
-            ok_val, val_msg = (False, None)
-
-        prompt = (
-            "Você é um assistente verificando prints de depósito em casas de apostas. "
-            "Analise a imagem e responda 'VALIDO' se o print for da plataforma m.start.bet.br, com o link m.start.bet.br visível no topo ou embaixo da tela (dependendo do celular), "
-            "e saldo maior que R$ 10,00 (positivo, acima de dez reais) no mesmo lugar que aparece na LuckBet. Responda 'INVALIDO' se o saldo for 10 ou menos, se o link não estiver visível, ou se não for possível identificar."
-        )
-
-        result = await multi_ai_analyze_image(image_bytes, prompt)
-
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=processing_msg.message_id)
-        except:
-            pass
-
-        # If local OCR validated and shows balance > 10, accept deposit
-        if ok_val:
-            import re as _re
-            m = _re.search(r"(\d+[.,]\d{2})", str(val_msg))
-            if m:
-                try:
-                    bal = float(m.group(1).replace(',', '.'))
-                except Exception:
-                    bal = None
-            else:
-                bal = None
-
-            if bal is not None and bal > 10.0:
-                # Record validation amount and mark user VIP
-                try:
-                    db.save_validation(chat_id, bal)
-                except Exception:
-                    logger.exception("Failed to save validation to DB")
-                db.set_vip(chat_id, True)
-                await update.message.reply_text(
-                    "Show! Cadastro e depósito confirmados. Aqui estão seus acessos:\n\n"
-                    f"📲 Link de acesso ao app: {LINK_APP}\n"
-                    f"💬 Link do grupo do Telegram (lives): {LINK_GRUPO}\n\n"
-                    "Boas apostas!"
-                )
-                logger.info("Deposit print kept at %s", fp)
-                return ConversationHandler.END
-
-        if result and "VALIDO" in result.upper():
-            # Try to extract an amount from the AI response
-            try:
-                import re as _re
-                m = _re.search(r"(\d+[.,]\d{2})", str(result))
-                if m:
-                    try:
-                        ai_bal = float(m.group(1).replace(',', '.'))
-                    except Exception:
-                        ai_bal = None
-                else:
-                    ai_bal = None
-            except Exception:
-                ai_bal = None
-
-            # If AI detected a numeric balance and it's > 10, record it
-            try:
-                if ai_bal is not None and ai_bal > 10.0:
-                    db.save_validation(chat_id, ai_bal)
-            except Exception:
-                logger.exception("Failed to save AI-detected validation to DB")
-
-            # Regardless, mark user VIP because AI judged the print VALIDO
-            db.set_vip(chat_id, True)
-            await update.message.reply_text(
-                "Show! Cadastro e depósito confirmados. Aqui estão seus acessos:\n\n"
-                f"📲 Link de acesso ao app: {LINK_APP}\n"
-                f"💬 Link do grupo do Telegram (lives): {LINK_GRUPO}\n\n"
-                "Boas apostas!"
-            )
-             # Send final video
-            try:
-                if os.path.exists("ronaldin-video-4-2YrD.mp4"):
-                    await update.message.reply_video(video=open("ronaldin-video-4-2YrD.mp4", 'rb'))
-            except Exception as e:
-                logger.error(f"Failed to send video: {e}")
-
-            return ConversationHandler.END
-        else:
-            await update.message.reply_text(
-                "Ainda não identifiquei o saldo positivo. Por favor, envie um print mostrando o saldo atualizado após o depósito."
-            )
-            return WAITING_FOR_DEPOSIT_PRINT
-    except Exception as e:
-        logger.error("Error processing deposit print: %s", e)
-    try:
-        await context.bot.delete_message(chat_id=chat_id, message_id=processing_msg.message_id)
-    except:
-        pass
-    await update.message.reply_text("Ocorreu um erro ao processar a imagem. Tente novamente.")
-    return WAITING_FOR_DEPOSIT_PRINT
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Operação cancelada. Digite /start para recomeçar.")
-    return ConversationHandler.END
-
-async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info("/ping received from %s", update.effective_user.id)
-    await update.message.reply_text("pong")
+# States for StartBet
+WAITING_FOR_YES = 'WAITING_FOR_YES'
+WAITING_FOR_REGISTRATION_PRINT = 'WAITING_FOR_REGISTRATION_PRINT'
+WAITING_FOR_DEPOSIT_PRINT = 'WAITING_FOR_DEPOSIT_PRINT'
 
 
 def get_main_buttons(is_vip=False):
-    buttons = [
-        [InlineKeyboardButton('🦉 INGRESSO VIP', callback_data='fluxo_vip'),
-         InlineKeyboardButton('📱 APP', callback_data='fluxo_app')],
-        [InlineKeyboardButton('💎 MINUTOS GRÁTIS', callback_data='fluxo_minutos')]
-    ]
+    if is_vip:
+        buttons = [
+            [InlineKeyboardButton('📱 ACESSAR APP', url=LINK_APP),
+             InlineKeyboardButton('💬 GRUPO VIP', url=LINK_GRUPO)]
+        ]
+    else:
+        buttons = [
+            [InlineKeyboardButton('🚀 QUERO ACESSO (APP + VIP)', callback_data='fluxo_startbet')],
+            [InlineKeyboardButton('💎 GRUPO GRATUITO', url=LINK_GRUPO)]
+        ]
     return InlineKeyboardMarkup(buttons)
 
+
+async def send_video_if_exists(update: Update, filename: str):
+    """Sends a video if it exists in the current directory."""
+    if os.path.exists(filename):
+        try:
+            with open(filename, 'rb') as video:
+                await update.message.reply_video(video=video)
+        except Exception as e:
+            log.error(f"Failed to send video {filename}: {e}")
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    log.info(f"START: {user.first_name}")
+    
+    db.create_or_update_user(user.id, user.username, user.first_name)
+    is_vip = db.is_user_vip(user.id)
+    
+    import random
+    saudacoes = [
+        f"E aí {user.first_name}! 🚀 Bora pra cima?",
+        f"Fala {user.first_name}! Chegou no lugar certo 🔥",
+        f"Opa {user.first_name}! Bem-vindo ao App do Ronaldin! ⚽",
+    ]
+
+    await update.message.reply_text(
+        f"{random.choice(saudacoes)}\n\n"
+        f"Quer liberar seu acesso ao **APP DO RONALDIN** e ao **Grupo VIP** agora?\n\n"
+        f"👇 Escolha abaixo:",
+        reply_markup=get_main_buttons(is_vip)
+    )
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     txt = update.message.text
-    logger.info("TEXTO: %s -> %s", user.id if user else '?', txt)
-    db.create_or_update_user(user.id, user.username or '', user.first_name or '')
+    log.info(f"TEXTO: {user.first_name} -> {txt}")
+    
+    db.create_or_update_user(user.id, user.username, user.first_name)
 
-    # Use simplified intents for menu flows
-    txt_norm = txt.lower()
-    if any(w in txt_norm for w in ['vip', 'coruja', 'corujao']):
-        await update.message.reply_text('Para validar VIP, envie um print da sua conta com saldo >= R$30.')
+    now = datetime.now()
+    if user.id in last_message_time:
+        if (now - last_message_time[user.id]).total_seconds() < 2:
+            return
+    last_message_time[user.id] = now
+    
+    txt_norm = txt.lower().replace('ã', 'a').replace('á', 'a').replace('é', 'e').replace('ó', 'o')
+
+    is_validated, _ = db.is_user_validated(user.id)
+    
+    # 1. Handle "Sim" logic if they are in the welcome flow
+    if any(w in txt_norm for w in ['sim', 'quero', 's', 'claro', 'bora']):
+        if is_validated:
+             await update.message.reply_text(
+                f"Você já tem acesso liberado! 👇",
+                reply_markup=get_main_buttons(is_vip=True)
+            )
+             return
+             
+        await send_video_if_exists(update, "ronaldin-video-1-AD6f.mp4")
+        await update.message.reply_text(
+            "Show! Só um detalhe importante: para acessar o app, você vai usar o mesmo login e senha da plataforma StartBet, porque o aplicativo é 100% integrado a ela.\n\n"
+            "Então é bem simples:\n"
+            "1️⃣ Crie sua conta na StartBet pelo link abaixo.\n"
+            "2️⃣ Tire um print da tela inicial (mostrando que está logado e com saldo 0,00).\n"
+            "3️⃣ Me envie o print aqui!\n\n"
+            f"🔗 Link de cadastro: {LINK_CADASTRO}"
+        )
+        user_states[user.id] = WAITING_FOR_REGISTRATION_PRINT
         return
 
-    # Fallback to AI chat responder
-    try:
-        resposta = await chat_ia.responder(txt)
-    except Exception:
-        logger.exception('ChatIA failed')
-        resposta = 'Desculpa, erro técnico ao processar sua mensagem.'
+    # 2. IA responde — sem menu, sem botão, resposta natural
+    is_new = not db.get_user(user.id) or (db.get_user(user.id)['interactions'] < 2)
 
-    is_vip = db.is_user_vip(user.id)
-    await update.message.reply_text(resposta, reply_markup=get_main_buttons(is_vip))
+    db.increment_interactions(user.id)
+    db.save_message(user.id, 'user', txt)
+
+    prompt = f"Usuário disse: '{txt}'. Responda de forma natural, curta e como brasileiro. Somos do StartBet App do Ronaldin."
+    resposta = await chat_ia.responder(prompt)
+    db.save_message(user.id, 'assistant', resposta)
+
+    if is_new or any(w in txt_norm for w in ['menu', 'opcoes', 'opcao', 'ajuda', 'help', 'start']):
+        is_vip = db.is_user_vip(user.id)
+        await update.message.reply_text(resposta, reply_markup=get_main_buttons(is_vip))
+    else:
+        await update.message.reply_text(resposta)
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    log.info(f"FOTO: {user.first_name}")
+    
+    db.create_or_update_user(user.id, user.username, user.first_name)
+
+    # Verifica se já foi validado
+    is_validated, _ = db.is_user_validated(user.id)
+    if is_validated:
+        await update.message.reply_text(
+            f"✅ Já tá validado! Não precisa mandar print de novo 😉\n\n"
+            f"Usa os botões abaixo pra acessar:",
+            reply_markup=get_main_buttons(is_vip=True)
+        )
+        return
+    
+    # Check what state the user is in (default to Registration if unknown)
+    estado_atual = user_states.get(user.id, WAITING_FOR_REGISTRATION_PRINT)
+    
+    try:
+        ph = await update.message.photo[-1].get_file()
+        safe_filename = f"{user.id}_{str(uuid.uuid4())[:8]}.jpg"
+        fp = PRINTS_DIR / safe_filename
+        await ph.download_to_drive(str(fp))
+        
+        await update.message.reply_text("🔍 Deixa eu analisar seu print...")
+
+        log.info(f"[VALIDACAO] Iniciando validação para user {user.id} no estado {estado_atual}")
+        eh_valido, msg_resultado = await validar_print(str(fp))
+        log.info(f"[VALIDACAO] OCR Result: valido={eh_valido}, msg={msg_resultado}")
+
+        if not eh_valido:
+            # If OCR completely failed to find the platform
+            await update.message.reply_text(
+                f"❌ Hmm, não consegui identificar a plataforma StartBet ou o saldo.\n\n"
+                f"Preciso de um screenshot da StartBet mostrando seu saldo.\n"
+                f"📸 Tenta tirar um print mais claro e manda de novo!"
+            )
+            return
+
+        # Try to extract the float value from the OCR message (e.g., "R$ 30.00")
+        saldo_float = 0.0
+        match = re.search(r'(\d+[.,]\d{2})', str(msg_resultado))
+        if match:
+            saldo_float = float(match.group(1).replace(',', '.'))
+
+        log.info(f"[VALIDACAO] Saldo extraído: {saldo_float}")
+
+        # --- LOGIC: REGISTRATION (0.00) ---
+        if estado_atual == WAITING_FOR_REGISTRATION_PRINT:
+            if saldo_float <= 1.0: # Accept 0.00
+                await update.message.reply_text(
+                    "✅ **Perfeito!** Vi que você já criou sua conta e ela está ativa.\n\n"
+                    "Mas vi que sua conta ainda está sem saldo (R$ 0,00).\n"
+                    "Para ativar o app e copiar os sinais, você precisa ter saldo na corretora para operar.\n\n"
+                    "👉 **Faça um depósito (mínimo R$ 20,00)** e me mande o print do saldo atualizado para eu liberar seu acesso!"
+                )
+                await send_video_if_exists(update, "ronaldin-video-3-fiTl.mp4")
+                user_states[user.id] = WAITING_FOR_DEPOSIT_PRINT
+            elif saldo_float >= 20.0:
+                # User already deposited and skipped step 1!
+                db.save_validation(user.id, saldo_float)
+                await update.message.reply_text(
+                    "🎉 **Show! Vi que você já tem conta com saldo!**\n\n"
+                    "Aqui estão seus acessos liberados:\n\n"
+                    f"📲 **App:** {LINK_APP}\n"
+                    f"💬 **Grupo:** {LINK_GRUPO}\n\n"
+                    "Boas apostas!"
+                )
+                await send_video_if_exists(update, "ronaldin-video-4-2YrD.mp4")
+                user_states.pop(user.id, None)
+            else:
+                await update.message.reply_text(
+                    f"❌ O saldo mínimo para liberar é R$ 20,00. O seu print mostra R$ {saldo_float:.2f}.\n\n"
+                    "Faça um depósito para completar o valor e mande o print novamente!"
+                )
+                user_states[user.id] = WAITING_FOR_DEPOSIT_PRINT
+
+        # --- LOGIC: DEPOSIT (>20.00) ---
+        elif estado_atual == WAITING_FOR_DEPOSIT_PRINT:
+            if saldo_float >= 20.0:
+                db.save_validation(user.id, saldo_float)
+                await update.message.reply_text(
+                    "🎉 **Show! Depósito confirmado.**\n\n"
+                    "Aqui estão seus acessos liberados:\n\n"
+                    f"📲 **App:** {LINK_APP}\n"
+                    f"💬 **Grupo:** {LINK_GRUPO}\n\n"
+                    "Boas apostas!"
+                )
+                await send_video_if_exists(update, "ronaldin-video-4-2YrD.mp4")
+                user_states.pop(user.id, None)
+            else:
+                await update.message.reply_text(
+                    f"❌ Ainda não identifiquei o saldo positivo (mínimo R$ 20,00). O seu print mostra R$ {saldo_float:.2f}.\n\n"
+                    "Por favor, envie um print mostrando o saldo atualizado após o depósito."
+                )
+
+    except Exception as e:
+        log.error(f"Erro ao processar foto: {e}")
+        await update.message.reply_text("❌ Deu ruim ao processar a imagem. Tenta mandar de novo!")
 
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
-    if query.data == 'fluxo_vip':
-        is_validated, balance = db.is_user_validated(uid)
+
+    if query.data == 'fluxo_startbet':
+        is_validated, _ = db.is_user_validated(uid)
         if is_validated:
-            await query.message.reply_text('✅ Já validado — acesso liberado!', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Entrar no VIP', url=LINK_GRUPO)]]))
+            await query.message.reply_text(
+                f"✅ Você já tá validado! Acesso liberado 👇",
+                reply_markup=get_main_buttons(is_vip=True)
+            )
         else:
-            db.set_user_step(uid, WAITING_FOR_REGISTRATION_PRINT)
-            await query.message.reply_text('Envie um print da sua conta (saldo 0,00) para iniciar a validação.')
-    elif query.data == 'fluxo_app':
-        await query.message.reply_text(f'Acesse o app: {LINK_APP}')
-    elif query.data == 'fluxo_minutos':
-        await query.message.reply_text('Grupo Minutos: link grátis (verifique o canal de suporte)')
+            user_states[uid] = WAITING_FOR_REGISTRATION_PRINT
+            await send_video_if_exists(update, "ronaldin-video-1-AD6f.mp4")
+            await query.message.reply_text(
+                "Para acessar o app e o grupo VIP, é bem simples:\n\n"
+                "1️⃣ Crie sua conta na StartBet pelo link abaixo.\n"
+                "2️⃣ Tire um print da tela inicial (mostrando que está logado e com saldo 0,00).\n"
+                "3️⃣ Me envie o print aqui!\n\n"
+                f"🔗 Link de cadastro: {LINK_CADASTRO}"
+            )
 
-
-async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Simple helper for debugging which returns basic user info."""
-    try:
-        user = update.effective_user
-        if not user:
-            await update.message.reply_text("No user information available in this update.")
-            return
-        uname = f"@{user.username}" if user.username else "(no username)"
-        await update.message.reply_text(
-            f"You are: {user.full_name}\nID: {user.id}\nUsername: {uname}\nFirst name: {user.first_name or ''}\nLast name: {user.last_name or ''}"
-        )
-    except Exception:
-        logger.exception("whoami handler failed")
-
-
-async def diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin-only diagnostic: returns getWebhookInfo from Telegram."""
-    user_id = update.effective_user.id
-    admin_ids = [s for s in os.getenv("ADMIN_IDS", "").split(",") if s]
-    if str(user_id) not in admin_ids:
-        await update.message.reply_text("Você não tem permissão para usar este comando.")
-        return
-    try:
-        tg_base = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-        resp = requests.post(tg_base + "/getWebhookInfo", timeout=10)
-        text = resp.text
-    except Exception as e:
-        text = f"Failed to getWebhookInfo: {e}"
-    # Telegram messages have length limits; if long, truncate and offer to check logs
-    if len(text) > 3500:
-        text = text[:3500] + "\n...[truncated]"
-    await update.message.reply_text(f"/diag result:\n{text}")
-
-async def catch_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        # Try to produce a compact representation of the update for logs
-        upd_repr = None
-        if hasattr(update, 'to_dict'):
-            upd_repr = update.to_dict()
-        else:
-            upd_repr = str(update)
-    except Exception:
-        upd_repr = str(update)
-    logger.debug("[CatchAll] Received update: %s", upd_repr)
-    # Diagnostic reply to confirm handler is active and webhook is delivering updates
-    try:
-        if hasattr(update, 'message') and update.message:
-            await update.message.reply_text("[DEBUG] Mensagem recebida pelo catch-all handler. O bot está online e recebeu sua mensagem.")
-        else:
-            logger.info("[CatchAll] Update received without message field: %s", update)
-    except Exception:
-        logger.exception("[CatchAll] Failed to send diagnostic reply")
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log.error(f"Erro: {context.error}")
 
 def main():
-    print("[Startup] Checking environment variables...")
-    print(f"TELEGRAM_TOKEN: {'set' if TELEGRAM_TOKEN else 'missing'}")
-    print(f"GEMINI_API_KEY: {'set' if GEMINI_API_KEY else 'missing'}")
-    print(f"GROQ_API_KEY: {'set' if GROQ_API_KEY else 'missing'}")
-    print(f"DEEPSEEK_API_KEY: {'set' if DEEPSEEK_API_KEY else 'missing'}")
-    print(f"CODEGEEX_API_KEY: {'set' if CODEGEEX_API_KEY else 'missing'}")
-    print(f"OPENAI_API_KEY: {'set' if OPENAI_API_KEY else 'missing'}")
+    log.info("Iniciando Bot StartBet...")
+    
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).request(HTTPXRequest(http_version="1.1")).build()
+    
+    app.add_handler(CommandHandler('start', cmd_start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_error_handler(error_handler)
+    
+    log.info('BOT CONECTADO E POLLING!')
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
-    if not TELEGRAM_TOKEN:
-        print("[ERROR] TELEGRAM_TOKEN not found in .env file. Exiting.")
-        exit(1)
-
-    WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-    # Prefer the platform-provided PORT (Railway sets PORT). Fall back to WEBHOOK_PORT or 8443.
-    def _parse_port():
-        raw = os.getenv("PORT") or os.getenv("WEBHOOK_PORT") or "8443"
-        try:
-            return int(raw)
-        except Exception:
-            # Try to extract digits from a value that may contain descriptive text
-            import re
-            m = re.search(r"(\d+)", str(raw))
-            if m:
-                try:
-                    return int(m.group(1))
-                except Exception:
-                    pass
-        # Fallback
-        return 8443
-
-    WEBHOOK_PORT = _parse_port()
-    # Normalize path (ensure leading slash for printing, but run_webhook wants path without leading slash)
-    raw_path = os.getenv("WEBHOOK_PATH", f"/webhook/{TELEGRAM_TOKEN}")
-    WEBHOOK_PATH = raw_path if raw_path.startswith("/") else "/" + raw_path
-
-    # --- LOCK FILE CHECK ---
-    try:
-        if os.path.exists(LOCKFILE_PATH):
-            print(f"[ERROR] Lock file found at {LOCKFILE_PATH}. Another instance may be running.\nIf you are sure no other instance is running, run: python bot_start.py --remove-lockfile\nThen try again.")
-            exit(1)
-        with open(LOCKFILE_PATH, 'w') as lockfile:
-            lockfile.write(str(os.getpid()))
-        atexit.register(remove_lockfile)
-    except Exception as e:
-        print(f"[ERROR] Could not create lock file: {e}")
-        exit(1)
-
-    # Use HTTPXRequest for improved HTTP handling (matches working bot)
-    application = Application.builder().token(TELEGRAM_TOKEN).request(HTTPXRequest(http_version="1.1")).build()
-
-    # Add a global error handler
-    async def error_handler(update, context):
-        logger.error("Exception while handling an update:", exc_info=context.error)
-        if update and hasattr(update, 'message') and update.message:
-            await update.message.reply_text("Ocorreu um erro inesperado. Tente novamente mais tarde.")
-
-    application.add_error_handler(error_handler)
-
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        states={
-            WAITING_FOR_YES: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_yes)],
-            WAITING_FOR_REGISTRATION_PRINT: [MessageHandler(filters.PHOTO, handle_registration_print)],
-            WAITING_FOR_DEPOSIT_PRINT: [MessageHandler(filters.PHOTO, handle_deposit_print)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel), CommandHandler("override", admin_override)],
-    )
-    application.add_handler(conv_handler)
-    # Add /ping command for basic test
-    application.add_handler(CommandHandler("ping", ping))
-    # Add /whoami for debugging
-    application.add_handler(CommandHandler("whoami", whoami))
-    application.add_handler(CommandHandler("diag", diag))
-    # Text handler (AI chat) and callback handler (inline buttons)
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    application.add_handler(CallbackQueryHandler(handle_callback))
-    # Add catch-all handler for diagnostics
-    application.add_handler(MessageHandler(filters.ALL, catch_all))
-
-    # --- Startup diagnostics: verify Telegram token and webhook info ---
-    def check_telegram_webhook():
-        try:
-            tg_base = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-            resp_getme = requests.post(tg_base + "/getMe", timeout=10)
-            logger.info("[StartupDiag] getMe status: %s %s", resp_getme.status_code, resp_getme.text)
-        except Exception as e:
-            logger.exception("[StartupDiag] getMe failed: %s", e)
-        try:
-            resp_wh = requests.post(tg_base + "/getWebhookInfo", timeout=10)
-            logger.info("[StartupDiag] getWebhookInfo status: %s %s", resp_wh.status_code, resp_wh.text)
-        except Exception as e:
-            logger.exception("[StartupDiag] getWebhookInfo failed: %s", e)
-
-    # Run diagnostics synchronously before starting the webhook server (helps debug misconfig)
-    try:
-        check_telegram_webhook()
-    except Exception:
-        logger.exception("[StartupDiag] Unexpected error while checking Telegram API")
-
-    def send_startup_message(text: str):
-        """Send a startup message to ADMIN_NOTIFY_ID or first ADMIN_IDS if configured."""
-        admin_id = os.getenv("ADMIN_NOTIFY_ID")
-        if not admin_id:
-            admin_ids = [s for s in os.getenv("ADMIN_IDS", "").split(",") if s]
-            admin_id = admin_ids[0] if admin_ids else None
-        if not admin_id:
-            logger.debug("[StartupNotify] No admin id configured; skipping startup notification")
-            return
-        try:
-            tg_base = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-            resp = requests.post(tg_base + "/sendMessage", json={"chat_id": admin_id, "text": text}, timeout=10)
-            logger.info("[StartupNotify] sendMessage status: %s %s", resp.status_code, resp.text)
-        except Exception as e:
-            logger.exception("[StartupNotify] Failed to send startup message: %s", e)
-
-    if WEBHOOK_URL:
-        # run_webhook expects url_path without leading slash
-        url_path = WEBHOOK_PATH.lstrip('/')
-        webhook_full_url = WEBHOOK_URL.rstrip('/') + '/' + url_path
-        print(f"[Startup] Webhook mode enabled. URL: {webhook_full_url} (listening on port {WEBHOOK_PORT})")
-        logger.info(f"[Startup] Webhook mode enabled. URL: {webhook_full_url} (listening on port {WEBHOOK_PORT})")
-        try:
-            # Note: do not call Telegram setWebhook here to avoid racing with the server startup.
-            # The Application.run_webhook(...) call will register the webhook when the server is ready.
-
-            # Re-check webhook info and decide whether to run webhook or fall back to polling.
-            try:
-                tg_base = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-                resp_wh = requests.post(tg_base + "/getWebhookInfo", timeout=10)
-                wh_json = resp_wh.json() if resp_wh is not None else {}
-            except Exception as e:
-                logger.exception("[StartupDiag] Failed to re-check getWebhookInfo: %s", e)
-                wh_json = {}
-
-            wh_result = wh_json.get('result', {}) if isinstance(wh_json, dict) else {}
-            wh_url = wh_result.get('url', '')
-            # Consider any last error/message/date as a sign webhook may be unreliable
-            last_error_msg = None
-            last_error_date = None
-            if isinstance(wh_result, dict):
-                last_error_msg = wh_result.get('last_error_message') or wh_result.get('last_synchronization_error_message')
-                last_error_date = wh_result.get('last_error_date') or wh_result.get('last_synchronization_error_date')
-
-            # If Telegram isn't pointing to our webhook URL or there is any recorded sync error/date, fall back to polling.
-            if not wh_url or wh_url.rstrip('/') != webhook_full_url.rstrip('/') or last_error_msg or last_error_date:
-                logger.warning("[StartupDiag] Webhook not usable (url=%s, last_error_msg=%s, last_error_date=%s). Falling back to polling.", wh_url, last_error_msg, last_error_date)
-                print("[Startup] Webhook appears misconfigured or failing; falling back to polling mode.")
-                # delete webhook to ensure polling can start without conflict
-                try:
-                    tg_base = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-                    requests.post(tg_base + "/deleteWebhook", timeout=10)
-                except Exception:
-                    logger.exception("[StartupDiag] Failed to delete webhook before polling fallback")
-                send_startup_message("Bot starting in polling mode due to webhook issues.")
-                application.run_polling()
-                return
-
-            # Otherwise run webhook as planned (and notify admin)
-            send_startup_message(f"Bot starting in webhook mode. URL: {webhook_full_url}")
-            application.run_webhook(
-                listen="0.0.0.0",
-                port=WEBHOOK_PORT,
-                url_path=url_path,
-                webhook_url=webhook_full_url,
-                max_connections=40,
-                drop_pending_updates=False,
-            )
-        except Exception as e:
-            print(f"[ERROR] Bot failed to start in webhook mode: {e}")
-            logger.exception("Bot failed to start in webhook mode")
-            # If webhook startup fails, try polling as a last resort
-            try:
-                logger.info("[StartupDiag] Attempting to start in polling mode as fallback")
-                application.run_polling()
-            except Exception as e2:
-                logger.exception("[StartupDiag] Polling fallback also failed: %s", e2)
-                exit(1)
-    else:
-        print("[Startup] Bot is running and polling...")
-        logger.info("[Startup] Bot is running and polling...")
-        try:
-            application.run_polling()
-        except Exception as e:
-            if 'Conflict: terminated by other getUpdates request' in str(e):
-                print("[ERROR] Telegram polling conflict: Another bot instance is running. Please ensure only one instance is active.\nIf you see this, check for other running bot processes locally, on Railway, or any other server.\n\nIf you are sure no other instance is running, try removing the lock file and restarting.")
-            else:
-                print(f"[ERROR] Bot failed to start: {e}")
-            remove_lockfile()
-            exit(1)
-
-
-if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--remove-lockfile":
-        remove_lockfile()
-        print(f"Lock file {LOCKFILE_PATH} removed.")
-    else:
-        main()
-
+if __name__ == '__main__':
+    main()
