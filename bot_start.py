@@ -543,6 +543,27 @@ def main():
             except Exception as e:
                 logger.exception("[StartupDiag] Failed to call setWebhook: %s", e)
 
+            # Re-check webhook info and decide whether to run webhook or fall back to polling.
+            try:
+                tg_base = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+                resp_wh = requests.post(tg_base + "/getWebhookInfo", timeout=10)
+                wh_json = resp_wh.json() if resp_wh is not None else {}
+            except Exception as e:
+                logger.exception("[StartupDiag] Failed to re-check getWebhookInfo: %s", e)
+                wh_json = {}
+
+            wh_result = wh_json.get('result', {}) if isinstance(wh_json, dict) else {}
+            wh_url = wh_result.get('url', '')
+            last_error = wh_result.get('last_error_message') or wh_result.get('last_synchronization_error_message') if isinstance(wh_result, dict) else None
+
+            # If Telegram isn't pointing to our webhook URL or there is a recent sync error, fall back to polling.
+            if not wh_url or wh_url.rstrip('/') != webhook_full_url.rstrip('/') or last_error:
+                logger.warning("[StartupDiag] Webhook not usable (url=%s, last_error=%s). Falling back to polling.", wh_url, last_error)
+                print("[Startup] Webhook appears misconfigured or failing; falling back to polling mode.")
+                application.run_polling()
+                return
+
+            # Otherwise run webhook as planned
             application.run_webhook(
                 listen="0.0.0.0",
                 port=WEBHOOK_PORT,
@@ -554,7 +575,13 @@ def main():
         except Exception as e:
             print(f"[ERROR] Bot failed to start in webhook mode: {e}")
             logger.exception("Bot failed to start in webhook mode")
-            exit(1)
+            # If webhook startup fails, try polling as a last resort
+            try:
+                logger.info("[StartupDiag] Attempting to start in polling mode as fallback")
+                application.run_polling()
+            except Exception as e2:
+                logger.exception("[StartupDiag] Polling fallback also failed: %s", e2)
+                exit(1)
     else:
         print("[Startup] Bot is running and polling...")
         logger.info("[Startup] Bot is running and polling...")
