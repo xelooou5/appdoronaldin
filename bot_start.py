@@ -408,6 +408,25 @@ async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info("/ping received from %s", update.effective_user.id)
     await update.message.reply_text("pong")
 
+
+async def diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only diagnostic: returns getWebhookInfo from Telegram."""
+    user_id = update.effective_user.id
+    admin_ids = [s for s in os.getenv("ADMIN_IDS", "").split(",") if s]
+    if str(user_id) not in admin_ids:
+        await update.message.reply_text("Você não tem permissão para usar este comando.")
+        return
+    try:
+        tg_base = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+        resp = requests.post(tg_base + "/getWebhookInfo", timeout=10)
+        text = resp.text
+    except Exception as e:
+        text = f"Failed to getWebhookInfo: {e}"
+    # Telegram messages have length limits; if long, truncate and offer to check logs
+    if len(text) > 3500:
+        text = text[:3500] + "\n...[truncated]"
+    await update.message.reply_text(f"/diag result:\n{text}")
+
 async def catch_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         # Try to produce a compact representation of the update for logs
@@ -482,6 +501,7 @@ def main():
     application.add_handler(conv_handler)
     # Add /ping command for basic test
     application.add_handler(CommandHandler("ping", ping))
+    application.add_handler(CommandHandler("diag", diag))
     # Add catch-all handler for diagnostics
     application.add_handler(MessageHandler(filters.ALL, catch_all))
 
