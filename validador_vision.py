@@ -85,4 +85,3 @@ async def validar_print(image_path: str) -> tuple[bool, str]:
     except Exception as e:
         log.error(f"[ERRO] {e}")
         return False, "Erro ao processar imagem"
-

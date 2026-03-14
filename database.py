@@ -19,7 +19,7 @@ class Database:
                 username TEXT,
                 first_name TEXT,
                 joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                step INTEGER DEFAULT 0,  -- 0: New, 1: Reg. Print, 2: Dep. Print, 3: Completed
+                step TEXT DEFAULT 'WAITING_FOR_REGISTRATION_PRINT',
                 is_vip BOOLEAN DEFAULT 0,
                 interactions INTEGER DEFAULT 0
             )
@@ -79,12 +79,12 @@ class Database:
 
     def set_user_step(self, user_id, step):
         cursor = self.conn.cursor()
-        cursor.execute('UPDATE users SET step = ? WHERE user_id = ?', (step, user_id))
+        cursor.execute('UPDATE users SET step = ? WHERE user_id = ?', (str(step), user_id))
         self.conn.commit()
 
     def set_vip(self, user_id, is_vip=True):
         cursor = self.conn.cursor()
-        cursor.execute('UPDATE users SET is_vip = ?, step = 3 WHERE user_id = ?', (is_vip, user_id))
+        cursor.execute('UPDATE users SET is_vip = ?, step = ? WHERE user_id = ?', (is_vip, 'COMPLETED', user_id))
         self.conn.commit()
 
     def save_validation(self, user_id, amount: float):
@@ -92,7 +92,7 @@ class Database:
         cursor = self.conn.cursor()
         cursor.execute('INSERT INTO validations (user_id, amount) VALUES (?, ?)', (user_id, float(amount)))
         # Also mark user as VIP and step completed
-        cursor.execute('UPDATE users SET is_vip = 1, step = 3 WHERE user_id = ?', (user_id,))
+        cursor.execute('UPDATE users SET is_vip = 1, step = ? WHERE user_id = ?', ('COMPLETED', user_id))
         self.conn.commit()
 
     def is_user_validated(self, user_id):
