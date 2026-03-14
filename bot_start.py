@@ -5,17 +5,17 @@ import sys
 import logging
 import re
 import uuid
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
+import requests
 
 load_dotenv()
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, CallbackQueryHandler, filters
 from telegram.request import HTTPXRequest
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
 import pytz
 
 from database import Database
@@ -141,7 +141,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # 2. IA responde — sem menu, sem botão, resposta natural
-    is_new = not db.get_user(user.id) or (db.get_user(user.id)['interactions'] < 2)
+    user_db = db.get_user(user.id)
+    is_new = not user_db or user_db['interactions'] < 2
 
     db.increment_interactions(user.id)
     db.save_message(user.id, 'user', txt)
@@ -283,7 +284,26 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    log.error(f"Erro: {context.error}")
+    log.error(f"Erro no handler principal: {context.error}", exc_info=context.error)
+
+async def cmd_ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("pong")
+
+async def cmd_whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    await update.message.reply_text(f"Você: {user.id} - {user.first_name} (@{user.username})")
+
+def delete_telegram_webhook(token: str) -> bool:
+    try:
+        url = f"https://api.telegram.org/bot{token}/deleteWebhook"
+        resp = requests.post(url, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get('ok'):
+                return True
+    except Exception as e:
+        log.error(f"Erro ao deletar webhook via HTTP API: {e}")
+    return False
 
 def main():
     log.info("Iniciando Bot StartBet...")
@@ -291,13 +311,18 @@ def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).request(HTTPXRequest(http_version="1.1")).build()
     
     app.add_handler(CommandHandler('start', cmd_start))
+    app.add_handler(CommandHandler('ping', cmd_ping))
+    app.add_handler(CommandHandler('whoami', cmd_whoami))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_error_handler(error_handler)
     
+    delete_telegram_webhook(TELEGRAM_TOKEN)
+
     log.info('BOT CONECTADO E POLLING!')
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    # We add drop_pending_updates=True so that old stuck messages don't block the queue
+    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
     main()
