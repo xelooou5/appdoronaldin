@@ -554,11 +554,16 @@ def main():
 
             wh_result = wh_json.get('result', {}) if isinstance(wh_json, dict) else {}
             wh_url = wh_result.get('url', '')
-            last_error = wh_result.get('last_error_message') or wh_result.get('last_synchronization_error_message') if isinstance(wh_result, dict) else None
+            # Consider any last error/message/date as a sign webhook may be unreliable
+            last_error_msg = None
+            last_error_date = None
+            if isinstance(wh_result, dict):
+                last_error_msg = wh_result.get('last_error_message') or wh_result.get('last_synchronization_error_message')
+                last_error_date = wh_result.get('last_error_date') or wh_result.get('last_synchronization_error_date')
 
-            # If Telegram isn't pointing to our webhook URL or there is a recent sync error, fall back to polling.
-            if not wh_url or wh_url.rstrip('/') != webhook_full_url.rstrip('/') or last_error:
-                logger.warning("[StartupDiag] Webhook not usable (url=%s, last_error=%s). Falling back to polling.", wh_url, last_error)
+            # If Telegram isn't pointing to our webhook URL or there is any recorded sync error/date, fall back to polling.
+            if not wh_url or wh_url.rstrip('/') != webhook_full_url.rstrip('/') or last_error_msg or last_error_date:
+                logger.warning("[StartupDiag] Webhook not usable (url=%s, last_error_msg=%s, last_error_date=%s). Falling back to polling.", wh_url, last_error_msg, last_error_date)
                 print("[Startup] Webhook appears misconfigured or failing; falling back to polling mode.")
                 application.run_polling()
                 return
