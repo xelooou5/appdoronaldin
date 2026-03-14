@@ -37,6 +37,17 @@ class Database:
         ''')
         self.conn.commit()
 
+        # Validations table to store successful validation events (amount and timestamp)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS validations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                amount REAL,
+                validated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        self.conn.commit()
+
     def create_or_update_user(self, user_id, username, first_name):
         cursor = self.conn.cursor()
         cursor.execute('SELECT user_id FROM users WHERE user_id = ?', (user_id,))
@@ -75,6 +86,37 @@ class Database:
         cursor = self.conn.cursor()
         cursor.execute('UPDATE users SET is_vip = ?, step = 3 WHERE user_id = ?', (is_vip, user_id))
         self.conn.commit()
+
+    def save_validation(self, user_id, amount: float):
+        """Record a successful validation for a user (amount in BRL)."""
+        cursor = self.conn.cursor()
+        cursor.execute('INSERT INTO validations (user_id, amount) VALUES (?, ?)', (user_id, float(amount)))
+        # Also mark user as VIP and step completed
+        cursor.execute('UPDATE users SET is_vip = 1, step = 3 WHERE user_id = ?', (user_id,))
+        self.conn.commit()
+
+    def is_user_validated(self, user_id):
+        """Return (is_validated: bool, amount: float|None) based on latest validation record."""
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT amount FROM validations WHERE user_id = ? ORDER BY validated_at DESC LIMIT 1', (user_id,))
+        row = cursor.fetchone()
+        if row:
+            try:
+                return True, float(row[0])
+            except Exception:
+                return True, None
+        # Fallback to users table is_vip flag
+        cursor.execute('SELECT is_vip FROM users WHERE user_id = ?', (user_id,))
+        row2 = cursor.fetchone()
+        if row2 and row2[0]:
+            return True, None
+        return False, None
+
+    def is_user_vip(self, user_id):
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT is_vip FROM users WHERE user_id = ?', (user_id,))
+        row = cursor.fetchone()
+        return bool(row and row[0])
 
     def save_message(self, user_id, role, content):
         cursor = self.conn.cursor()

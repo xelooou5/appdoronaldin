@@ -4,7 +4,7 @@ import logging
 import io
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler, CallbackQueryHandler
 from PIL import Image
 # --- AI and HTTP ---
 import openai
@@ -12,6 +12,12 @@ import requests
 import base64
 # Database
 from database import Database
+from validador_vision import validar_print
+from chat_ia import chat_ia
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.request import HTTPXRequest
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 
  # --- PYTHON VERSION CHECK ---
 # Deployment trigger: 2026-03-13 - force redeploy for webhook mode test
@@ -84,6 +90,11 @@ LINK_GRUPO = "https://t.me/+8imjlHQtZTE1MjYx"
 
 # Initialize Database
 db = Database()
+
+# Persistent prints directory (mirror of working bot)
+BASE_DIR = os.path.dirname(__file__)
+PRINTS_DIR = os.path.join(BASE_DIR, 'auditoria_prints')
+os.makedirs(PRINTS_DIR, exist_ok=True)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -297,6 +308,19 @@ async def handle_registration_print(update: Update, context: ContextTypes.DEFAUL
         file = await context.bot.get_file(photo.file_id)
         image_bytes = await file.download_as_bytearray()
 
+        # Save incoming photo to persistent prints dir and try local OCR validator
+        try:
+            import uuid as _uuid
+            safe_filename = f"{chat_id}_{str(_uuid.uuid4())[:8]}.jpg"
+            fp = os.path.join(PRINTS_DIR, safe_filename)
+            with open(fp, 'wb') as _f:
+                _f.write(image_bytes)
+            logger.info("Saved registration print to %s", fp)
+            ok_val, val_msg = await validar_print(fp)
+        except Exception as _e:
+            logger.debug("Local OCR validator failed: %s", _e)
+            ok_val, val_msg = (False, None)
+
         prompt = (
             "Você é um assistente verificando prints de cadastro em casas de apostas. "
             "Analise a imagem e responda 'VALIDO' se parecer um print de uma conta logada na plataforma m.start.bet.br, "
@@ -312,6 +336,39 @@ async def handle_registration_print(update: Update, context: ContextTypes.DEFAUL
         except:
             pass
 
+        # If local OCR validated and shows a zero or near-zero balance, accept as registration print
+        if ok_val:
+            # val_msg is like 'R$0.00' or 'R$12.34'
+            import re as _re
+            m = _re.search(r"(\d+[.,]\d{2})", str(val_msg))
+            if m:
+                try:
+                    bal = float(m.group(1).replace(',', '.'))
+                except Exception:
+                    bal = None
+            else:
+                bal = None
+
+            if bal is not None and bal <= 1.0:
+                # Treat as zero-balance registration
+                await update.message.reply_text(
+                    "Perfeito, vi que você já criou sua conta com saldo zerado.\n"
+                    "Agora faça um depósito (mínimo R$ 20,00) e me mande o print do saldo atualizado para eu liberar seu acesso!"
+                )
+                db.set_user_step(chat_id, WAITING_FOR_DEPOSIT_PRINT)
+                logger.info("Registration print kept at %s", fp)
+                return WAITING_FOR_DEPOSIT_PRINT
+            else:
+                # If OCR found a positive balance, move directly to deposit step
+                if bal is not None and bal > 1.0:
+                    await update.message.reply_text(
+                        "Vi que sua conta já tem saldo positivo. Vou pedir apenas o print do depósito atualizado para confirmar e liberar o acesso."
+                    )
+                    db.set_user_step(chat_id, WAITING_FOR_DEPOSIT_PRINT)
+                    logger.info("Registration print kept at %s", fp)
+                    return WAITING_FOR_DEPOSIT_PRINT
+
+        # Fallback to AI analysis if OCR didn't clearly validate
         if result and "VALIDO" in result.upper():
             await update.message.reply_text(
                 "Perfeito, vi que você já criou sua conta.\n"
@@ -357,6 +414,19 @@ async def handle_deposit_print(update: Update, context: ContextTypes.DEFAULT_TYP
         file = await context.bot.get_file(photo.file_id)
         image_bytes = await file.download_as_bytearray()
 
+        # Save incoming photo to persistent prints dir and try local OCR validator
+        try:
+            import uuid as _uuid
+            safe_filename = f"{chat_id}_{str(_uuid.uuid4())[:8]}.jpg"
+            fp = os.path.join(PRINTS_DIR, safe_filename)
+            with open(fp, 'wb') as _f:
+                _f.write(image_bytes)
+            logger.info("Saved deposit print to %s", fp)
+            ok_val, val_msg = await validar_print(fp)
+        except Exception as _e:
+            logger.debug("Local OCR validator failed: %s", _e)
+            ok_val, val_msg = (False, None)
+
         prompt = (
             "Você é um assistente verificando prints de depósito em casas de apostas. "
             "Analise a imagem e responda 'VALIDO' se o print for da plataforma m.start.bet.br, com o link m.start.bet.br visível no topo ou embaixo da tela (dependendo do celular), "
@@ -370,7 +440,57 @@ async def handle_deposit_print(update: Update, context: ContextTypes.DEFAULT_TYP
         except:
             pass
 
+        # If local OCR validated and shows balance > 10, accept deposit
+        if ok_val:
+            import re as _re
+            m = _re.search(r"(\d+[.,]\d{2})", str(val_msg))
+            if m:
+                try:
+                    bal = float(m.group(1).replace(',', '.'))
+                except Exception:
+                    bal = None
+            else:
+                bal = None
+
+            if bal is not None and bal > 10.0:
+                # Record validation amount and mark user VIP
+                try:
+                    db.save_validation(chat_id, bal)
+                except Exception:
+                    logger.exception("Failed to save validation to DB")
+                db.set_vip(chat_id, True)
+                await update.message.reply_text(
+                    "Show! Cadastro e depósito confirmados. Aqui estão seus acessos:\n\n"
+                    f"📲 Link de acesso ao app: {LINK_APP}\n"
+                    f"💬 Link do grupo do Telegram (lives): {LINK_GRUPO}\n\n"
+                    "Boas apostas!"
+                )
+                logger.info("Deposit print kept at %s", fp)
+                return ConversationHandler.END
+
         if result and "VALIDO" in result.upper():
+            # Try to extract an amount from the AI response
+            try:
+                import re as _re
+                m = _re.search(r"(\d+[.,]\d{2})", str(result))
+                if m:
+                    try:
+                        ai_bal = float(m.group(1).replace(',', '.'))
+                    except Exception:
+                        ai_bal = None
+                else:
+                    ai_bal = None
+            except Exception:
+                ai_bal = None
+
+            # If AI detected a numeric balance and it's > 10, record it
+            try:
+                if ai_bal is not None and ai_bal > 10.0:
+                    db.save_validation(chat_id, ai_bal)
+            except Exception:
+                logger.exception("Failed to save AI-detected validation to DB")
+
+            # Regardless, mark user VIP because AI judged the print VALIDO
             db.set_vip(chat_id, True)
             await update.message.reply_text(
                 "Show! Cadastro e depósito confirmados. Aqui estão seus acessos:\n\n"
@@ -407,6 +527,70 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info("/ping received from %s", update.effective_user.id)
     await update.message.reply_text("pong")
+
+
+def get_main_buttons(is_vip=False):
+    buttons = [
+        [InlineKeyboardButton('🦉 INGRESSO VIP', callback_data='fluxo_vip'),
+         InlineKeyboardButton('📱 APP', callback_data='fluxo_app')],
+        [InlineKeyboardButton('💎 MINUTOS GRÁTIS', callback_data='fluxo_minutos')]
+    ]
+    return InlineKeyboardMarkup(buttons)
+
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    txt = update.message.text
+    logger.info("TEXTO: %s -> %s", user.id if user else '?', txt)
+    db.create_or_update_user(user.id, user.username or '', user.first_name or '')
+
+    # Use simplified intents for menu flows
+    txt_norm = txt.lower()
+    if any(w in txt_norm for w in ['vip', 'coruja', 'corujao']):
+        await update.message.reply_text('Para validar VIP, envie um print da sua conta com saldo >= R$30.')
+        return
+
+    # Fallback to AI chat responder
+    try:
+        resposta = await chat_ia.responder(txt)
+    except Exception:
+        logger.exception('ChatIA failed')
+        resposta = 'Desculpa, erro técnico ao processar sua mensagem.'
+
+    is_vip = db.is_user_vip(user.id)
+    await update.message.reply_text(resposta, reply_markup=get_main_buttons(is_vip))
+
+
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    if query.data == 'fluxo_vip':
+        is_validated, balance = db.is_user_validated(uid)
+        if is_validated:
+            await query.message.reply_text('✅ Já validado — acesso liberado!', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Entrar no VIP', url=LINK_GRUPO)]]))
+        else:
+            db.set_user_step(uid, WAITING_FOR_REGISTRATION_PRINT)
+            await query.message.reply_text('Envie um print da sua conta (saldo 0,00) para iniciar a validação.')
+    elif query.data == 'fluxo_app':
+        await query.message.reply_text(f'Acesse o app: {LINK_APP}')
+    elif query.data == 'fluxo_minutos':
+        await query.message.reply_text('Grupo Minutos: link grátis (verifique o canal de suporte)')
+
+
+async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Simple helper for debugging which returns basic user info."""
+    try:
+        user = update.effective_user
+        if not user:
+            await update.message.reply_text("No user information available in this update.")
+            return
+        uname = f"@{user.username}" if user.username else "(no username)"
+        await update.message.reply_text(
+            f"You are: {user.full_name}\nID: {user.id}\nUsername: {uname}\nFirst name: {user.first_name or ''}\nLast name: {user.last_name or ''}"
+        )
+    except Exception:
+        logger.exception("whoami handler failed")
 
 
 async def diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -462,7 +646,23 @@ def main():
 
     WEBHOOK_URL = os.getenv("WEBHOOK_URL")
     # Prefer the platform-provided PORT (Railway sets PORT). Fall back to WEBHOOK_PORT or 8443.
-    WEBHOOK_PORT = int(os.getenv("PORT", os.getenv("WEBHOOK_PORT", "8443")))
+    def _parse_port():
+        raw = os.getenv("PORT") or os.getenv("WEBHOOK_PORT") or "8443"
+        try:
+            return int(raw)
+        except Exception:
+            # Try to extract digits from a value that may contain descriptive text
+            import re
+            m = re.search(r"(\d+)", str(raw))
+            if m:
+                try:
+                    return int(m.group(1))
+                except Exception:
+                    pass
+        # Fallback
+        return 8443
+
+    WEBHOOK_PORT = _parse_port()
     # Normalize path (ensure leading slash for printing, but run_webhook wants path without leading slash)
     raw_path = os.getenv("WEBHOOK_PATH", f"/webhook/{TELEGRAM_TOKEN}")
     WEBHOOK_PATH = raw_path if raw_path.startswith("/") else "/" + raw_path
@@ -479,7 +679,8 @@ def main():
         print(f"[ERROR] Could not create lock file: {e}")
         exit(1)
 
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    # Use HTTPXRequest for improved HTTP handling (matches working bot)
+    application = Application.builder().token(TELEGRAM_TOKEN).request(HTTPXRequest(http_version="1.1")).build()
 
     # Add a global error handler
     async def error_handler(update, context):
@@ -501,7 +702,12 @@ def main():
     application.add_handler(conv_handler)
     # Add /ping command for basic test
     application.add_handler(CommandHandler("ping", ping))
+    # Add /whoami for debugging
+    application.add_handler(CommandHandler("whoami", whoami))
     application.add_handler(CommandHandler("diag", diag))
+    # Text handler (AI chat) and callback handler (inline buttons)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    application.add_handler(CallbackQueryHandler(handle_callback))
     # Add catch-all handler for diagnostics
     application.add_handler(MessageHandler(filters.ALL, catch_all))
 

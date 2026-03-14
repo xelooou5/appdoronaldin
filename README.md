@@ -29,3 +29,55 @@ The project includes a `Procfile` for easy deployment on platforms like Railway 
 
 *   **Build Command**: `pip install -r requirements.txt`
 *   **Start Command**: `python main.py`
+
+## INSTRUCTIONS (PowerShell)
+
+Below are convenient PowerShell commands to commit, push, run locally, and simulate webhook delivery.
+
+1) Stage and commit all changes:
+
+```powershell
+cd C:\Users\Amanda\PycharmProjects\PythonProject1
+git add -A
+git commit -m "Fix whoami handler; robust webhook port parsing; add simulate_webhook utility; pin requirements"
+```
+
+2) Push to remote:
+
+```powershell
+git push origin HEAD
+```
+
+3) Syntax check for Python files:
+
+```powershell
+Get-ChildItem -Recurse -Filter *.py | ForEach-Object { python -m py_compile $_.FullName }
+if ($LASTEXITCODE -eq 0) { Write-Host "All python files compiled successfully." } else { Write-Host "One or more files failed to compile." }
+```
+
+4) Run bot locally (polling):
+
+```powershell
+$env:TELEGRAM_TOKEN = "YOUR_BOT_TOKEN"
+Remove-Item Env:\WEBHOOK_URL -ErrorAction SilentlyContinue
+python .\bot_start.py
+```
+
+5) Simulate a webhook POST to the deployed app:
+
+```powershell
+$env:WEBHOOK_TEST_URL = "https://appdoronaldin-production-2bfc.up.railway.app/webhook/<YOUR_PATH>"
+python .\simulate_webhook.py
+# or
+python .\simulate_webhook.py https://appdoronaldin-production-2bfc.up.railway.app/webhook/<YOUR_PATH>
+```
+
+6) Check/delete Telegram webhook:
+
+```powershell
+$token = "YOUR_BOT_TOKEN"
+Invoke-RestMethod -Uri "https://api.telegram.org/bot$token/getWebhookInfo" -Method Post | ConvertTo-Json -Depth 5
+Invoke-RestMethod -Uri "https://api.telegram.org/bot$token/deleteWebhook" -Method Post
+```
+
+
