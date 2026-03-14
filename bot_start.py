@@ -512,6 +512,17 @@ def main():
         print(f"[Startup] Webhook mode enabled. URL: {webhook_full_url} (listening on port {WEBHOOK_PORT})")
         logger.info(f"[Startup] Webhook mode enabled. URL: {webhook_full_url} (listening on port {WEBHOOK_PORT})")
         try:
+            # Ensure Telegram is set to call our webhook URL explicitly.
+            try:
+                tg_base = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+                resp_set = requests.post(tg_base + "/setWebhook", json={"url": webhook_full_url}, timeout=10)
+                try:
+                    logger.info("[StartupDiag] setWebhook status: %s %s", resp_set.status_code, resp_set.text)
+                except Exception:
+                    logger.info("[StartupDiag] setWebhook response received")
+            except Exception as e:
+                logger.exception("[StartupDiag] Failed to call setWebhook: %s", e)
+
             application.run_webhook(
                 listen="0.0.0.0",
                 port=WEBHOOK_PORT,
