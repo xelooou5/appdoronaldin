@@ -525,6 +525,22 @@ def main():
     except Exception:
         logger.exception("[StartupDiag] Unexpected error while checking Telegram API")
 
+    def send_startup_message(text: str):
+        """Send a startup message to ADMIN_NOTIFY_ID or first ADMIN_IDS if configured."""
+        admin_id = os.getenv("ADMIN_NOTIFY_ID")
+        if not admin_id:
+            admin_ids = [s for s in os.getenv("ADMIN_IDS", "").split(",") if s]
+            admin_id = admin_ids[0] if admin_ids else None
+        if not admin_id:
+            logger.debug("[StartupNotify] No admin id configured; skipping startup notification")
+            return
+        try:
+            tg_base = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+            resp = requests.post(tg_base + "/sendMessage", json={"chat_id": admin_id, "text": text}, timeout=10)
+            logger.info("[StartupNotify] sendMessage status: %s %s", resp.status_code, resp.text)
+        except Exception as e:
+            logger.exception("[StartupNotify] Failed to send startup message: %s", e)
+
     if WEBHOOK_URL:
         # run_webhook expects url_path without leading slash
         url_path = WEBHOOK_PATH.lstrip('/')
@@ -565,10 +581,18 @@ def main():
             if not wh_url or wh_url.rstrip('/') != webhook_full_url.rstrip('/') or last_error_msg or last_error_date:
                 logger.warning("[StartupDiag] Webhook not usable (url=%s, last_error_msg=%s, last_error_date=%s). Falling back to polling.", wh_url, last_error_msg, last_error_date)
                 print("[Startup] Webhook appears misconfigured or failing; falling back to polling mode.")
+                # delete webhook to ensure polling can start without conflict
+                try:
+                    tg_base = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+                    requests.post(tg_base + "/deleteWebhook", timeout=10)
+                except Exception:
+                    logger.exception("[StartupDiag] Failed to delete webhook before polling fallback")
+                send_startup_message("Bot starting in polling mode due to webhook issues.")
                 application.run_polling()
                 return
 
-            # Otherwise run webhook as planned
+            # Otherwise run webhook as planned (and notify admin)
+            send_startup_message(f"Bot starting in webhook mode. URL: {webhook_full_url}")
             application.run_webhook(
                 listen="0.0.0.0",
                 port=WEBHOOK_PORT,
