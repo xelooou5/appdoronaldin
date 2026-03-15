@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import os, sys, logging, re, sqlite3, json, base64
-from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Optional
-import aiohttp
-from dotenv import load_dotenv
+import os
+import sys
+import logging
+import re
 import uuid
-import pytz
+import asyncio
+from datetime import datetime
+from pathlib import Path
+from dotenv import load_dotenv
+import requests
 
 load_dotenv()
 
@@ -15,9 +17,11 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, CallbackQueryHandler, filters
 from telegram.request import HTTPXRequest
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
+import pytz
+
 from database import Database
 from validador_vision import validar_print
+from chat_ia import ChatIA
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,18 +37,11 @@ PRINTS_DIR = BASE_DIR / 'auditoria_prints'
 PRINTS_DIR.mkdir(exist_ok=True)
 
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
-GROQ_API_KEY = os.getenv('GROQ_API_KEY')
-DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-GEMINI_API_KEY_2 = os.getenv('GEMINI_API_KEY_2')
-GEMINI_API_KEY_3 = os.getenv('GEMINI_API_KEY_3')
-
-
 if not TELEGRAM_TOKEN:
     log.error("TELEGRAM_TOKEN não configurado!")
     sys.exit(1)
 
-# StartBet Links (Substituted from original luck.bet links)
+# StartBet Links
 LINK_CADASTRO = 'https://start.bet.br/signup?btag=CX-48705_445081'
 LINK_APP = 'https://appdoronaldin.com.br/'
 LINK_GRUPO = 'https://t.me/+8imjlHQtZTE1MjYx'
@@ -54,64 +51,19 @@ BRAZIL_TZ = pytz.timezone('America/Sao_Paulo')
 user_states = {}
 last_message_time = {}
 db = Database()
-
-class ChatIA:
-    def __init__(self):
-        pass
-
-    def get_system_prompt(self):
-        return """Você é o bot do App do Ronaldin.
-Fala como brasileiro de verdade: direto, engraçado.
-ESPECIALIDADES:
-- Sinais, apostas, StartBet
-REGRAS:
-1. Máximo 5-6 linhas.
-2. NUNCA mencione URLs.
-3. Emojis moderados.
-4. Responda em português."""
-
-    async def responder_groq(self, prompt: str) -> Optional[str]:
-        if not GROQ_API_KEY: return None
-        try:
-            url = "https://api.groq.com/openai/v1/chat/completions"
-            headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-            payload = {"model": "llama-3.3-70b-versatile", "messages": [{"role": "system", "content": self.get_system_prompt()}, {"role": "user", "content": prompt}], "max_tokens": 1500, "temperature": 0.85}
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload, headers=headers) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        return data['choices'][0]['message']['content'].strip()
-            return None
-        except: return None
-
-    async def responder_gemini(self, prompt: str) -> Optional[str]:
-        keys = [GEMINI_API_KEY, GEMINI_API_KEY_2, GEMINI_API_KEY_3]
-        for key in keys:
-            if not key: continue
-            try:
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={key}"
-                payload = {"contents": [{"parts": [{"text": self.get_system_prompt()}, {"text": prompt}]}]}
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(url, json=payload) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            return data['candidates'][0]['content']['parts'][0]['text'].strip()
-            except: continue
-        return None
-
-    async def responder(self, pergunta: str) -> str:
-        log.info(f"[IA] Pergunta: {pergunta}")
-        for nome, metodo in [("GROQ", self.responder_groq), ("GEMINI", self.responder_gemini)]:
-            resposta = await metodo(pergunta)
-            if resposta: return resposta
-        return "Desculpa, tive um problema técnico. Tenta de novo!"
-
 chat_ia = ChatIA()
+
+# States for StartBet
+WAITING_FOR_YES = 'WAITING_FOR_YES'
+WAITING_FOR_REGISTRATION_PRINT = 'WAITING_FOR_REGISTRATION_PRINT'
+WAITING_FOR_DEPOSIT_PRINT = 'WAITING_FOR_DEPOSIT_PRINT'
+
 
 def get_main_buttons(is_vip=False):
     if is_vip:
         buttons = [
-            [InlineKeyboardButton('📱 ACESSAR APP', url=LINK_APP), InlineKeyboardButton('💬 GRUPO VIP', url=LINK_GRUPO)]
+            [InlineKeyboardButton('📱 ACESSAR APP', url=LINK_APP),
+             InlineKeyboardButton('💬 GRUPO VIP', url=LINK_GRUPO)]
         ]
     else:
         buttons = [
@@ -120,13 +72,33 @@ def get_main_buttons(is_vip=False):
         ]
     return InlineKeyboardMarkup(buttons)
 
+async def send_video_if_exists(update: Update, filename: str):
+    """Sends a video if it exists in the current directory."""
+    if os.path.exists(filename):
+        try:
+            with open(filename, 'rb') as video:
+                await update.message.reply_video(video=video)
+        except Exception as e:
+            log.error(f"Failed to send video {filename}: {e}")
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     log.info(f"START: {user.first_name}")
+    
     db.create_or_update_user(user.id, user.username, user.first_name)
     is_vip = db.is_user_vip(user.id)
+    
+    import random
+    saudacoes = [
+        f"E aí {user.first_name}! 🚀 Bora pra cima?",
+        f"Fala {user.first_name}! Chegou no lugar certo 🔥",
+        f"Opa {user.first_name}! Bem-vindo ao App do Ronaldin! ⚽",
+    ]
+
     await update.message.reply_text(
-        f"Opa {user.first_name}! Tudo certo?\n\nQuer acesso ao app e ao grupo VIP gratuito de sinais?\n\n👇 Escolha abaixo:",
+        f"{random.choice(saudacoes)}\n\n"
+        f"Quer liberar seu acesso ao **APP DO RONALDIN** e ao **Grupo VIP** agora?\n\n"
+        f"👇 Escolha abaixo:",
         reply_markup=get_main_buttons(is_vip)
     )
 
@@ -134,83 +106,151 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     txt = update.message.text
     log.info(f"TEXTO: {user.first_name} -> {txt}")
+    
     db.create_or_update_user(user.id, user.username, user.first_name)
 
     now = datetime.now()
-    if user.id in last_message_time and (now - last_message_time[user.id]).total_seconds() < 2: return
+    if user.id in last_message_time:
+        if (now - last_message_time[user.id]).total_seconds() < 2:
+            return
     last_message_time[user.id] = now
     
-    txt_norm = txt.lower()
+    txt_norm = txt.lower().replace('ã', 'a').replace('á', 'a').replace('é', 'e').replace('ó', 'o')
 
-    if any(w in txt_norm for w in ['sim', 'quero', 's', 'claro']):
-        if db.is_user_vip(user.id):
-            await update.message.reply_text("Você já tem acesso! 👇", reply_markup=get_main_buttons(is_vip=True))
-            return
-        user_states[user.id] = 'WAITING_FOR_REGISTRATION_PRINT'
+    is_validated, _ = db.is_user_validated(user.id)
+    
+    if any(w in txt_norm for w in ['sim', 'quero', 's', 'claro', 'bora']):
+        if is_validated:
+             await update.message.reply_text(
+                f"Você já tem acesso liberado! 👇",
+                reply_markup=get_main_buttons(is_vip=True)
+            )
+             return
+             
+        await send_video_if_exists(update, "ronaldin-video-1-AD6f.mp4")
         await update.message.reply_text(
-            f"Só um detalhe importante: para acessar o app, você vai usar o mesmo login e senha da plataforma StartBet.\n\n"
-            f"Crie sua conta na StartBet e me envie o print confirmando o cadastro (saldo 0,00).\n\n"
-            f"Link: {LINK_CADASTRO}"
+            "Show! Só um detalhe importante: para acessar o app, você vai usar o mesmo login e senha da plataforma StartBet, porque o aplicativo é 100% integrado a ela.\n\n"
+            "Então é bem simples:\n"
+            "1️⃣ Crie sua conta na StartBet pelo link abaixo.\n"
+            "2️⃣ Tire um print da tela inicial (mostrando que está logado e com saldo 0,00).\n"
+            "3️⃣ Me envie o print aqui!\n\n"
+            f"🔗 Link de cadastro: {LINK_CADASTRO}"
         )
+        user_states[user.id] = WAITING_FOR_REGISTRATION_PRINT
         return
 
-    is_new = not db.get_user(user.id) or (db.get_user(user.id) and db.get_user(user.id)['interactions'] < 2)
+    # Check if we should respond with IA
+    user_db = db.get_user(user.id)
+    is_new = not user_db or user_db['interactions'] < 2
+
     db.increment_interactions(user.id)
-    resposta = await chat_ia.responder(txt)
-    
-    if is_new or any(w in txt_norm for w in ['menu', 'start']):
-        await update.message.reply_text(resposta, reply_markup=get_main_buttons(db.is_user_vip(user.id)))
+    db.save_message(user.id, 'user', txt)
+
+    prompt = f"Usuário disse: '{txt}'. Responda de forma natural, curta e como brasileiro. Somos do StartBet App do Ronaldin."
+    resposta = await chat_ia.responder(prompt)
+    db.save_message(user.id, 'assistant', resposta)
+
+    if is_new or any(w in txt_norm for w in ['menu', 'opcoes', 'opcao', 'ajuda', 'help', 'start']):
+        is_vip = db.is_user_vip(user.id)
+        await update.message.reply_text(resposta, reply_markup=get_main_buttons(is_vip))
     else:
         await update.message.reply_text(resposta)
+
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     log.info(f"FOTO: {user.first_name}")
+    
     db.create_or_update_user(user.id, user.username, user.first_name)
 
-    if db.is_user_vip(user.id):
-        await update.message.reply_text("✅ Já tá validado!", reply_markup=get_main_buttons(is_vip=True))
+    is_validated, _ = db.is_user_validated(user.id)
+    if is_validated:
+        await update.message.reply_text(
+            f"✅ Já tá validado! Não precisa mandar print de novo 😉\n\n"
+            f"Usa os botões abaixo pra acessar:",
+            reply_markup=get_main_buttons(is_vip=True)
+        )
         return
     
-    estado_atual = user_states.get(user.id, 'WAITING_FOR_REGISTRATION_PRINT')
+    estado_atual = user_states.get(user.id, WAITING_FOR_REGISTRATION_PRINT)
     
     try:
         ph = await update.message.photo[-1].get_file()
         safe_filename = f"{user.id}_{str(uuid.uuid4())[:8]}.jpg"
         fp = PRINTS_DIR / safe_filename
         await ph.download_to_drive(str(fp))
-        await update.message.reply_text("🔍 Deixa eu dar uma olhada...")
+        
+        await update.message.reply_text("🔍 Deixa eu analisar seu print...")
 
+        log.info(f"[VALIDACAO] Iniciando validação para user {user.id} no estado {estado_atual}")
         eh_valido, msg_resultado = await validar_print(str(fp))
-        log.info(f"[VALIDACAO] Resultado: {eh_valido}, msg={msg_resultado}")
+        log.info(f"[VALIDACAO] OCR Result: valido={eh_valido}, msg={msg_resultado}")
 
         if not eh_valido:
-            await update.message.reply_text("❌ Não identifiquei a StartBet. Tenta de novo!")
+            await update.message.reply_text(
+                f"❌ Hmm, não consegui identificar a plataforma StartBet ou o saldo.\n\n"
+                f"Preciso de um screenshot da StartBet mostrando seu saldo.\n"
+                f"📸 Tenta tirar um print mais claro e manda de novo!"
+            )
             return
 
-        saldo = 0.0
+        saldo_float = 0.0
         match = re.search(r'(\d+[.,]\d{2})', str(msg_resultado))
-        if match: saldo = float(match.group(1).replace(',', '.'))
+        if match:
+            saldo_float = float(match.group(1).replace(',', '.'))
 
-        if estado_atual == 'WAITING_FOR_REGISTRATION_PRINT':
-            if saldo <= 1.0:
-                await update.message.reply_text("Perfeito, vi que criou a conta. Mas tá sem saldo!\n\nFaça um depósito (mínimo R$20) e mande o print para liberar o acesso.")
-                user_states[user.id] = 'WAITING_FOR_DEPOSIT_PRINT'
-            elif saldo >= 20.0:
-                db.set_vip(user.id, True)
-                await update.message.reply_text(f"Show! Acesso liberado:\nApp: {LINK_APP}\nGrupo: {LINK_GRUPO}")
+        log.info(f"[VALIDACAO] Saldo extraído: {saldo_float}")
+
+        if estado_atual == WAITING_FOR_REGISTRATION_PRINT:
+            if saldo_float <= 1.0: 
+                await update.message.reply_text(
+                    "✅ **Perfeito!** Vi que você já criou sua conta e ela está ativa.\n\n"
+                    "Mas vi que sua conta ainda está sem saldo (R$ 0,00).\n"
+                    "Para ativar o app e copiar os sinais, você precisa ter saldo na corretora para operar.\n\n"
+                    "👉 **Faça um depósito (mínimo R$ 20,00)** e me mande o print do saldo atualizado para eu liberar seu acesso!"
+                )
+                await send_video_if_exists(update, "ronaldin-video-3-fiTl.mp4")
+                user_states[user.id] = WAITING_FOR_DEPOSIT_PRINT
+            elif saldo_float >= 20.0:
+                db.save_validation(user.id, saldo_float)
+                await update.message.reply_text(
+                    "🎉 **Show! Vi que você já tem conta com saldo!**\n\n"
+                    "Aqui estão seus acessos liberados:\n\n"
+                    f"📲 **App:** {LINK_APP}\n"
+                    f"💬 **Grupo:** {LINK_GRUPO}\n\n"
+                    "Boas apostas!"
+                )
+                await send_video_if_exists(update, "ronaldin-video-4-2YrD.mp4")
+                user_states.pop(user.id, None)
             else:
-                await update.message.reply_text("O saldo mínimo é R$20. Faça um depósito!")
-                user_states[user.id] = 'WAITING_FOR_DEPOSIT_PRINT'
-        elif estado_atual == 'WAITING_FOR_DEPOSIT_PRINT':
-            if saldo >= 20.0:
-                db.set_vip(user.id, True)
-                await update.message.reply_text(f"Show! Acesso liberado:\nApp: {LINK_APP}\nGrupo: {LINK_GRUPO}")
+                await update.message.reply_text(
+                    f"❌ O saldo mínimo para liberar é R$ 20,00. O seu print mostra R$ {saldo_float:.2f}.\n\n"
+                    "Faça um depósito para completar o valor e mande o print novamente!"
+                )
+                user_states[user.id] = WAITING_FOR_DEPOSIT_PRINT
+
+        elif estado_atual == WAITING_FOR_DEPOSIT_PRINT:
+            if saldo_float >= 20.0:
+                db.save_validation(user.id, saldo_float)
+                await update.message.reply_text(
+                    "🎉 **Show! Depósito confirmado.**\n\n"
+                    "Aqui estão seus acessos liberados:\n\n"
+                    f"📲 **App:** {LINK_APP}\n"
+                    f"💬 **Grupo:** {LINK_GRUPO}\n\n"
+                    "Boas apostas!"
+                )
+                await send_video_if_exists(update, "ronaldin-video-4-2YrD.mp4")
+                user_states.pop(user.id, None)
             else:
-                await update.message.reply_text("Ainda não vi os R$20+. Mande o print atualizado!")
+                await update.message.reply_text(
+                    f"❌ Ainda não identifiquei o saldo positivo (mínimo R$ 20,00). O seu print mostra R$ {saldo_float:.2f}.\n\n"
+                    "Por favor, envie um print mostrando o saldo atualizado após o depósito."
+                )
+
     except Exception as e:
-        log.error(f"Erro foto: {e}")
-        await update.message.reply_text("❌ Deu erro ao processar. Tenta de novo.")
+        log.error(f"Erro ao processar foto: {e}")
+        await update.message.reply_text("❌ Deu ruim ao processar a imagem. Tenta mandar de novo!")
+
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -218,29 +258,67 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = query.from_user.id
 
     if query.data == 'fluxo_startbet':
-        if db.is_user_vip(uid):
-            await query.message.reply_text("✅ Já validado!", reply_markup=get_main_buttons(is_vip=True))
-        else:
-            user_states[uid] = 'WAITING_FOR_REGISTRATION_PRINT'
+        is_validated, _ = db.is_user_validated(uid)
+        if is_validated:
             await query.message.reply_text(
-                f"1️⃣ Crie sua conta na StartBet pelo link abaixo.\n"
-                f"2️⃣ Tire um print com saldo 0,00.\n"
-                f"3️⃣ Me envie o print aqui!\n\nLink: {LINK_CADASTRO}"
+                f"✅ Você já tá validado! Acesso liberado 👇",
+                reply_markup=get_main_buttons(is_vip=True)
+            )
+        else:
+            user_states[uid] = WAITING_FOR_REGISTRATION_PRINT
+            await send_video_if_exists(update, "ronaldin-video-1-AD6f.mp4")
+            await query.message.reply_text(
+                "Para acessar o app e o grupo VIP, é bem simples:\n\n"
+                "1️⃣ Crie sua conta na StartBet pelo link abaixo.\n"
+                "2️⃣ Tire um print da tela inicial (mostrando que está logado e com saldo 0,00).\n"
+                "3️⃣ Me envie o print aqui!\n\n"
+                f"🔗 Link de cadastro: {LINK_CADASTRO}"
             )
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    log.error(f"Erro: {context.error}")
+    log.error(f"Erro no handler principal: {context.error}", exc_info=context.error)
+
+async def cmd_ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("pong")
+
+async def cmd_whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    await update.message.reply_text(f"Você: {user.id} - {user.first_name} (@{user.username})")
+
+def delete_telegram_webhook(token: str) -> bool:
+    try:
+        url = f"https://api.telegram.org/bot{token}/deleteWebhook"
+        resp = requests.post(url, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get('ok'):
+                log.info("Webhook deleted successfully.")
+                return True
+    except Exception as e:
+        log.error(f"Erro ao deletar webhook via HTTP API: {e}")
+    return False
 
 def main():
-    log.info("Iniciando Bot StartBet (Clone exato da Luck)...")
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).request(HTTPXRequest(http_version="1.1")).build()
+    log.info("Iniciando Bot StartBet...")
+    
+    if not TELEGRAM_TOKEN:
+        log.error("TELEGRAM_TOKEN não configurado!")
+        sys.exit(1)
+
+    delete_telegram_webhook(TELEGRAM_TOKEN)
+
+    # Use default builder, exactly like the LuckBet bot originally had
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    
     app.add_handler(CommandHandler('start', cmd_start))
+    app.add_handler(CommandHandler('ping', cmd_ping))
+    app.add_handler(CommandHandler('whoami', cmd_whoami))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_error_handler(error_handler)
     
-    log.info('BOT CONECTADO!')
+    log.info('BOT CONECTADO E POLLING!')
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
