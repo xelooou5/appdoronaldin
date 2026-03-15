@@ -37,9 +37,6 @@ PRINTS_DIR = BASE_DIR / 'auditoria_prints'
 PRINTS_DIR.mkdir(exist_ok=True)
 
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
-if not TELEGRAM_TOKEN:
-    log.error("TELEGRAM_TOKEN não configurado!")
-    sys.exit(1)
 
 # StartBet Links
 LINK_CADASTRO = 'https://start.bet.br/signup?btag=CX-48705_445081'
@@ -88,17 +85,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db.create_or_update_user(user.id, user.username, user.first_name)
     is_vip = db.is_user_vip(user.id)
     
-    import random
-    saudacoes = [
-        f"E aí {user.first_name}! 🚀 Bora pra cima?",
-        f"Fala {user.first_name}! Chegou no lugar certo 🔥",
-        f"Opa {user.first_name}! Bem-vindo ao App do Ronaldin! ⚽",
-    ]
-
     await update.message.reply_text(
-        f"{random.choice(saudacoes)}\n\n"
-        f"Quer liberar seu acesso ao **APP DO RONALDIN** e ao **Grupo VIP** agora?\n\n"
-        f"👇 Escolha abaixo:",
+        f"Opa! Tudo certo? 🤙\n\n"
+        f"Quer acesso ao app e ao grupo gratuito de sinais?",
         reply_markup=get_main_buttons(is_vip)
     )
 
@@ -119,7 +108,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     is_validated, _ = db.is_user_validated(user.id)
     
-    if any(w in txt_norm for w in ['sim', 'quero', 's', 'claro', 'bora']):
+    if any(w in txt_norm for w in ['sim', 'quero', 's', 'claro', 'bora', 'ja criei', 'ja fiz']):
         if is_validated:
              await update.message.reply_text(
                 f"Você já tem acesso liberado! 👇",
@@ -127,13 +116,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
              return
              
-        await send_video_if_exists(update, "ronaldin-video-1-AD6f.mp4")
+        if 'ja fiz' in txt_norm or 'ja criei' in txt_norm:
+            await update.message.reply_text("Show! 👊 Me manda o print da tela da sua conta na StartBet pra eu confirmar e liberar seu acesso!")
+            user_states[user.id] = WAITING_FOR_REGISTRATION_PRINT
+            return
+
         await update.message.reply_text(
-            "Show! Só um detalhe importante: para acessar o app, você vai usar o mesmo login e senha da plataforma StartBet, porque o aplicativo é 100% integrado a ela.\n\n"
-            "Então é bem simples:\n"
-            "1️⃣ Crie sua conta na StartBet pelo link abaixo.\n"
-            "2️⃣ Tire um print da tela inicial (mostrando que está logado e com saldo 0,00).\n"
-            "3️⃣ Me envie o print aqui!\n\n"
+            "Maravilha! 🚀\n\n"
+            "Só um detalhe importante: para acessar o app, você vai usar o mesmo login e senha da plataforma StartBet, porque o aplicativo é 100% integrado a ela.\n\n"
+            "Então é bem simples: crie sua conta na StartBet e me envie o print confirmando o cadastro. Assim que mandar, libero seu acesso ao app 👊\n"
             f"🔗 Link de cadastro: {LINK_CADASTRO}"
         )
         user_states[user.id] = WAITING_FOR_REGISTRATION_PRINT
@@ -204,12 +195,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if estado_atual == WAITING_FOR_REGISTRATION_PRINT:
             if saldo_float <= 1.0: 
                 await update.message.reply_text(
-                    "✅ **Perfeito!** Vi que você já criou sua conta e ela está ativa.\n\n"
-                    "Mas vi que sua conta ainda está sem saldo (R$ 0,00).\n"
-                    "Para ativar o app e copiar os sinais, você precisa ter saldo na corretora para operar.\n\n"
+                    "- Perfeito, vi que você já criou sua conta, Mas vi que sua conta ainda está sem saldo.\n\n"
                     "👉 **Faça um depósito (mínimo R$ 20,00)** e me mande o print do saldo atualizado para eu liberar seu acesso!"
                 )
-                await send_video_if_exists(update, "ronaldin-video-3-fiTl.mp4")
                 user_states[user.id] = WAITING_FOR_DEPOSIT_PRINT
             elif saldo_float >= 20.0:
                 db.save_validation(user.id, saldo_float)
@@ -220,7 +208,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"💬 **Grupo:** {LINK_GRUPO}\n\n"
                     "Boas apostas!"
                 )
-                await send_video_if_exists(update, "ronaldin-video-4-2YrD.mp4")
                 user_states.pop(user.id, None)
             else:
                 await update.message.reply_text(
@@ -239,7 +226,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"💬 **Grupo:** {LINK_GRUPO}\n\n"
                     "Boas apostas!"
                 )
-                await send_video_if_exists(update, "ronaldin-video-4-2YrD.mp4")
                 user_states.pop(user.id, None)
             else:
                 await update.message.reply_text(
@@ -266,12 +252,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             user_states[uid] = WAITING_FOR_REGISTRATION_PRINT
-            await send_video_if_exists(update, "ronaldin-video-1-AD6f.mp4")
             await query.message.reply_text(
-                "Para acessar o app e o grupo VIP, é bem simples:\n\n"
-                "1️⃣ Crie sua conta na StartBet pelo link abaixo.\n"
-                "2️⃣ Tire um print da tela inicial (mostrando que está logado e com saldo 0,00).\n"
-                "3️⃣ Me envie o print aqui!\n\n"
+                "Maravilha! 🚀\n\n"
+                "Só um detalhe importante: para acessar o app, você vai usar o mesmo login e senha da plataforma StartBet, porque o aplicativo é 100% integrado a ela.\n\n"
+                "Então é bem simples: crie sua conta na StartBet e me envie o print confirmando o cadastro. Assim que mandar, libero seu acesso ao app 👊\n"
                 f"🔗 Link de cadastro: {LINK_CADASTRO}"
             )
 
@@ -285,19 +269,6 @@ async def cmd_whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await update.message.reply_text(f"Você: {user.id} - {user.first_name} (@{user.username})")
 
-def delete_telegram_webhook(token: str) -> bool:
-    try:
-        url = f"https://api.telegram.org/bot{token}/deleteWebhook"
-        resp = requests.post(url, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get('ok'):
-                log.info("Webhook deleted successfully.")
-                return True
-    except Exception as e:
-        log.error(f"Erro ao deletar webhook via HTTP API: {e}")
-    return False
-
 def main():
     log.info("Iniciando Bot StartBet...")
     
@@ -305,9 +276,6 @@ def main():
         log.error("TELEGRAM_TOKEN não configurado!")
         sys.exit(1)
 
-    delete_telegram_webhook(TELEGRAM_TOKEN)
-
-    # Use default builder, exactly like the LuckBet bot originally had
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     
     app.add_handler(CommandHandler('start', cmd_start))
