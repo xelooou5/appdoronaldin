@@ -36,9 +36,6 @@ PRINTS_DIR = BASE_DIR / 'auditoria_prints'
 PRINTS_DIR.mkdir(exist_ok=True)
 
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
-if not TELEGRAM_TOKEN:
-    log.error("TELEGRAM_TOKEN não configurado!")
-    sys.exit(1)
 
 # StartBet Links
 LINK_CADASTRO = 'https://start.bet.br/signup?btag=CX-48705_445081'
@@ -307,7 +304,16 @@ def delete_telegram_webhook(token: str) -> bool:
 
 def main():
     log.info("Iniciando Bot StartBet...")
-    
+    # Allow disabling the bot via BOT_ENABLED; keep process alive but do not start poller
+    bot_enabled = os.getenv('BOT_ENABLED', '1')
+    if str(bot_enabled).lower() in ('0', 'false', 'no'):
+        log.info('BOT_DISABLED via BOT_ENABLED env var. Exiting without starting bot.')
+        return
+
+    if not TELEGRAM_TOKEN:
+        log.error("TELEGRAM_TOKEN não configurado! Set TELEGRAM_TOKEN in environment or set BOT_ENABLED=0 to keep process idle.")
+        sys.exit(1)
+
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).request(HTTPXRequest(http_version="1.1")).build()
     
     app.add_handler(CommandHandler('start', cmd_start))
@@ -318,11 +324,12 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_error_handler(error_handler)
     
+    # Always run in polling mode (getUpdates) — mirror behavior of bot_final.py
+    # Ensure any webhook is removed so polling works reliably
     delete_telegram_webhook(TELEGRAM_TOKEN)
-
-    log.info('BOT CONECTADO E POLLING!')
-    # We add drop_pending_updates=True so that old stuck messages don't block the queue
-    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
+    log.info('BOT CONECTADO!')
+    # Start polling for updates (same signature used in bot_final.py)
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
     main()
