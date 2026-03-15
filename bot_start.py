@@ -16,6 +16,7 @@ load_dotenv()
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, CallbackQueryHandler, filters
 from telegram.request import HTTPXRequest
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import pytz
 
 from database import Database
@@ -324,8 +325,21 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_error_handler(error_handler)
     
-    # Always run in polling mode (getUpdates) — mirror behavior of bot_final.py
-    # Ensure any webhook is removed so polling works reliably
+    # Scheduler: mirror the other bot's startup behavior (no scheduled jobs added here)
+    try:
+        scheduler = AsyncIOScheduler(timezone=BRAZIL_TZ)
+        scheduler.start()
+        log.info('Scheduler started')
+    except Exception as e:
+        log.warning(f'Could not start scheduler: {e}')
+
+    # Log which IA providers are configured (for parity with bot_final)
+    GROQ = bool(os.getenv('GROQ_API_KEY'))
+    DEEPSEEK = bool(os.getenv('DEEPSEEK_API_KEY'))
+    GEMINI = any([os.getenv('GEMINI_API_KEY'), os.getenv('GEMINI_API_KEY_2'), os.getenv('GEMINI_API_KEY_3')])
+    log.info(f"IAs: GROQ={GROQ}, DEEPSEEK={DEEPSEEK}, GEMINI={GEMINI}")
+
+    # Always run in polling mode (getUpdates) — ensure any webhook is removed first
     delete_telegram_webhook(TELEGRAM_TOKEN)
     log.info('BOT CONECTADO!')
     # Start polling for updates (same signature used in bot_final.py)
