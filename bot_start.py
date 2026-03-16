@@ -5,7 +5,7 @@ import sys
 import logging
 import re
 import uuid
-import asyncio
+import time
 from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
@@ -37,6 +37,9 @@ PRINTS_DIR = BASE_DIR / 'auditoria_prints'
 PRINTS_DIR.mkdir(exist_ok=True)
 
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+if not TELEGRAM_TOKEN:
+    log.error("TELEGRAM_TOKEN não configurado!")
+    sys.exit(1)
 
 # StartBet Links
 LINK_CADASTRO = 'https://start.bet.br/signup?btag=CX-48705_445081'
@@ -192,14 +195,17 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         log.info(f"[VALIDACAO] Saldo extraído: {saldo_float}")
 
+        # --- LOGIC: REGISTRATION (0.00) ---
         if estado_atual == WAITING_FOR_REGISTRATION_PRINT:
             if saldo_float <= 1.0: 
                 await update.message.reply_text(
                     "- Perfeito, vi que você já criou sua conta, Mas vi que sua conta ainda está sem saldo.\n\n"
                     "👉 **Faça um depósito (mínimo R$ 20,00)** e me mande o print do saldo atualizado para eu liberar seu acesso!"
                 )
+                await send_video_if_exists(update, "ronaldin-video-3-fiTl.mp4")
                 user_states[user.id] = WAITING_FOR_DEPOSIT_PRINT
             elif saldo_float >= 20.0:
+                # User already deposited and skipped step 1!
                 db.save_validation(user.id, saldo_float)
                 await update.message.reply_text(
                     "🎉 **Show! Vi que você já tem conta com saldo!**\n\n"
@@ -216,6 +222,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 user_states[user.id] = WAITING_FOR_DEPOSIT_PRINT
 
+        # --- LOGIC: DEPOSIT (>20.00) ---
         elif estado_atual == WAITING_FOR_DEPOSIT_PRINT:
             if saldo_float >= 20.0:
                 db.save_validation(user.id, saldo_float)
@@ -260,7 +267,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    log.error(f"Erro no handler principal: {context.error}", exc_info=context.error)
+    if 'Conflict' in str(context.error):
+        log.warning("Detected 409 Conflict! Another instance is stealing messages. Retrying in 10s...")
+    else:
+        log.error(f"Erro no handler principal: {context.error}", exc_info=context.error)
 
 async def cmd_ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("pong")
@@ -276,7 +286,9 @@ def main():
         log.error("TELEGRAM_TOKEN não configurado!")
         sys.exit(1)
 
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    # Force connection resilience
+    request = HTTPXRequest(http_version="1.1", connect_timeout=10.0, read_timeout=10.0)
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).request(request).build()
     
     app.add_handler(CommandHandler('start', cmd_start))
     app.add_handler(CommandHandler('ping', cmd_ping))
@@ -287,7 +299,19 @@ def main():
     app.add_error_handler(error_handler)
     
     log.info('BOT CONECTADO E POLLING!')
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    
+    while True:
+        try:
+            # We explicitly drop_pending_updates=True to forcefully clear any backlogged corrupted queue that could be quietly hanging the updates loop.
+            app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+            break
+        except Exception as e:
+            if 'Conflict' in str(e):
+                log.error("CRITICAL: 409 Conflict hit. Sleeping 15s to let the other instance die...")
+                time.sleep(15)
+            else:
+                log.error(f"Polling crashed: {e}. Retrying in 5s...")
+                time.sleep(5)
 
 if __name__ == '__main__':
     main()
